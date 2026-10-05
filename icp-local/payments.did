@@ -1,0 +1,142 @@
+type Listing = record {
+  id : nat64;
+  nft_id : text;
+  seller : principal;
+  price_e8s : nat64;
+  sold : bool;
+};
+type Receipt = record {
+  listing_id : nat64;
+  nft_id : text;
+  buyer : principal;
+  seller : principal;
+  price_e8s : nat64;
+  seller_got_e8s : nat64;
+  platform_fee_e8s : nat64;
+  pull_block : nat;
+  payout_block : nat;
+  timestamp_ns : nat64;
+};
+type Config = record {
+  ledger : principal;
+  ledger_fee_e8s : nat64;
+  platform_fee_bps : nat16;
+};
+type BuyResult = variant { Ok : Receipt; Err : text };
+type MintKind = variant { Photo; Metadata; MetadataBatch };
+type MintQuoteRequest = record {
+  kind : MintKind;
+  bytes : nat64;
+  count : nat64;
+  storage_years : nat16;
+};
+type MintQuote = record {
+  kind : MintKind;
+  bytes : nat64;
+  count : nat64;
+  storage_years : nat16;
+  mint_cycles_per_item : nat64;
+  storage_cycles_per_item_year : nat64;
+  total_cycles : nat;
+  markup_bps : nat64;
+  xdr_permyriad_per_icp : nat64;
+  rate_timestamp_seconds : nat64;
+  price_e8s : nat64;
+};
+type Plan = record {
+  id : text;
+  name : text;
+  price_usd_cents : nat64;
+  period_days : nat32;
+  photo_mints : nat64;
+  metadata_mints : nat64;
+  max_photo_kb : nat64;
+  storage_years : nat16;
+};
+type PlanQuote = record {
+  plan : Plan;
+  price_e8s : nat64;
+  xdr_permyriad_per_icp : nat64;
+  rate_timestamp_seconds : nat64;
+  max_cost_cycles : nat;
+};
+type Subscription = record {
+  owner : principal;
+  plan_id : text;
+  photo_mints_left : nat64;
+  metadata_mints_left : nat64;
+  max_photo_kb : nat64;
+  expires_at_ns : nat64;
+};
+type PlanPurchase = record {
+  id : nat64;
+  buyer : principal;
+  plan_id : text;
+  price_e8s : nat64;
+  block : nat;
+  timestamp_ns : nat64;
+};
+type UsageKind = variant { Photo; Metadata };
+type Account = record { owner : principal; subaccount : opt blob };
+type Token = record {
+  owner : principal;
+  metadata : text;
+  image_id : opt nat64;
+  minted_at_ns : nat64;
+};
+type MintResult = record {
+  token_ids : vec nat64;
+  image_bytes : nat64;
+  subscription : Subscription;
+};
+type NftStats = record {
+  cycles : nat;
+  tokens : nat64;
+  images : nat64;
+  image_bytes : nat64;
+  heap_bytes : nat64;
+};
+type Value = variant { Nat : nat; Text : text };
+type Pricing = record {
+  mint_call_cycles : nat64;
+  mint_cycles_per_byte : nat64;
+  batch_item_cycles : nat64;
+  storage_cycles_per_gib_sec : nat64;
+  markup_bps : nat64;
+  xdr_usd : float64;
+  xdr_permyriad_per_icp : nat64;
+  rate_timestamp_seconds : nat64;
+  ledger : principal;
+  ledger_fee_e8s : nat64;
+};
+service : {
+  create_listing : (text, nat64) -> (nat64);
+  buy : (nat64) -> (BuyResult);
+  get_listing : (nat64) -> (opt Listing) query;
+  list_listings : () -> (vec Listing) query;
+  receipts : () -> (vec Receipt) query;
+  config : () -> (Config) query;
+  platform_balance : () -> (nat);
+  refresh_rate : () -> (variant { Ok : nat64; Err : text });
+  quote_mint : (MintQuoteRequest) -> (variant { Ok : MintQuote; Err : text }) query;
+  plans : () -> (variant { Ok : vec PlanQuote; Err : text }) query;
+  set_plans : (vec Plan) -> (variant { Ok; Err : text });
+  buy_plan : (text, nat64) -> (variant { Ok : Subscription; Err : text });
+  subscription_of : (principal) -> (opt Subscription) query;
+  purchases_of : (principal) -> (vec PlanPurchase) query;
+  consume_mints : (principal, UsageKind, nat64, nat64) -> (variant { Ok : Subscription; Err : text });
+  create_upload : () -> (variant { Ok : nat64; Err : text });
+  append_chunk : (nat64, blob) -> (variant { Ok : nat64; Err : text });
+  mint_uploaded : (nat64, text, nat32) -> (variant { Ok : MintResult; Err : text });
+  mint_metadata : (vec text) -> (variant { Ok : MintResult; Err : text });
+  icrc7_name : () -> (text) query;
+  icrc7_symbol : () -> (text) query;
+  icrc7_total_supply : () -> (nat) query;
+  icrc7_owner_of : (vec nat) -> (vec opt Account) query;
+  icrc7_tokens_of : (Account, opt nat, opt nat) -> (vec nat) query;
+  icrc7_token_metadata : (vec nat) -> (vec opt vec record { text; Value }) query;
+  get_token : (nat64) -> (opt Token) query;
+  get_image : (nat64) -> (opt blob) query;
+  nft_stats : () -> (NftStats) query;
+  pricing : () -> (Pricing) query;
+}

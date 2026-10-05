@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://github.com/dfinity/icp-cli/raw/refs/tags/v1.3.0/docs/schemas/icp-yaml-schema.json
+# Local test environment for MarkICP crypto payments.
+# The local network ships the ICP ledger (ryjl3-tyaaa-aaaaa-aaaba-cai) and seeds identities with ICP.
+canisters:
+  - name: payments
+    recipe:
+      type: "@dfinity/rust@v3.4.0"
+      configuration:
+        shrink: true
+        candid: payments.did

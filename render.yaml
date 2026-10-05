@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: idenity-api
+    runtime: docker
+    plan: standard
+    branch: master
+    envVars:
+      - key: RUST_LOG
+        value: info
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_API_KEY
+        sync: false
+      - key: FIREBASE_STORAGE_BUCKET
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: SOLANA_RPC_URL
+        value: https://api.devnet.solana.com
+      - key: ALLOWED_ORIGIN
+        value: https://alankharisov.github.io
+      - key: ADMIN_UIDS
+        sync: false
+      - key: QR_BASE_URL
+        value: https://alankharisov.github.io/idenity/
+    healthCheckPath: /health
+    autoDeploy: true

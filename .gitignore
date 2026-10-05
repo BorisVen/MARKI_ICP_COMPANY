@@ -1,0 +1,10 @@
+node_modules/
+build/
+dist/
+target/
+.icp/
+.env
+.env.local
+*.local
+*.pem
+.DS_Store
