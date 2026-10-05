@@ -1313,7 +1313,7 @@ function QrModal({ nft, onClose }: { nft: NFT; onClose: () => void }) {
   const [generating, setGenerating] = useState(false);
 
   const url = useMemo(() => {
-    const base = (import.meta.env.VITE_QR_BASE_URL as string) || 'https://your-domain.github.io/idenity/';
+    const base = (import.meta.env.VITE_QR_BASE_URL as string) || 'https://borisven.github.io/MARKI_ICP/';
     if (nft.nfcUid) return `${base}?nfc=${encodeURIComponent(nft.nfcUid)}`;
     return `${base}?nft=${encodeURIComponent(nft.id)}`;
   }, [nft.id, nft.nfcUid]);
