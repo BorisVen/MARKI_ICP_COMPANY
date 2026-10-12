@@ -28,6 +28,8 @@ export const Icon = {
     wrap(<><line x1="4" y1="6"  x2="20" y2="6"  /><line x1="4" y1="12" x2="20" y2="12" /><line x1="4" y1="18" x2="14" y2="18" /></>, size),
   Wallet: ({ size }: IconProps = {}) =>
     wrap(<><rect x="3" y="6" width="18" height="13" rx="2" /><path d="M16 13h2" /><path d="M3 10h18" /></>, size),
+  Gift: ({ size }: IconProps = {}) =>
+    wrap(<><rect x="3" y="8" width="18" height="4" rx="1" /><path d="M12 8v13" /><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7" /><path d="M7.5 8a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8s1-5 4.5-5a2.5 2.5 0 0 1 0 5" /></>, size),
   Tag: ({ size }: IconProps = {}) =>
     wrap(<><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z" /><circle cx="7.5" cy="7.5" r="1.5" /></>, size),
   More: ({ size }: IconProps = {}) =>

@@ -8,3 +8,16 @@ canisters:
       configuration:
         shrink: true
         candid: payments.did
+
+# Mainnet. Starts on TESTICP (free test token) so plans and mints can be tested
+# without real money; switch to ICP with `set_ledger` (or reinstall without
+# init_args) before launch. A 90-day freezing threshold keeps a cycles reserve.
+environments:
+  - name: ic
+    network: ic
+    canisters: [payments]
+    settings:
+      payments:
+        freezing_threshold: 90d
+    init_args:
+      payments: "(opt record { ledger = opt principal \"xafvr-biaaa-aaaai-aql5q-cai\" })"

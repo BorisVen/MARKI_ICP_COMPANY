@@ -7,6 +7,7 @@ interface ImportMetaEnv {
   readonly VITE_ICP_NFT_CANISTER_ID?: string;
   readonly VITE_ICP_PAYMENTS_CANISTER_ID?: string;
   readonly VITE_ICP_LEDGER_CANISTER_ID?: string;
+  readonly VITE_USER_APP_URL?: string;
 }
 
 interface ImportMeta {

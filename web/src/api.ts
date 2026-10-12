@@ -121,9 +121,16 @@ export type NFT = {
   batchName?: string;
   batchIndex?: number;
   batchSize?: number;
+  /** Editions: 0 = master (original), 1..N = copies. */
+  editionNumber?: number;
+  editionCount?: number;
+  masterNftId?: string;
   qrImageUrl?: string;
   /** `icp:<canister>:<token>` after an on-chain mint. */
   mintAddress?: string;
+  /** Set when the NFT was received as a gift. */
+  giftFrom?: string;
+  giftId?: string;
 };
 
 export type Post = {
@@ -443,3 +450,32 @@ export const apiAiGenerateImage = async (prompt: string): Promise<Blob> => {
   });
   return res.blob();
 };
+
+// ── Gifts ────────────────────────────────────────────────────────────────────
+
+export type GiftClaim = { nftId: string; sourceNftId: string; uid: string; name: string; username: string; claimedAt: string };
+export type Gift = {
+  id: string;
+  ownerId: string;
+  ownerName: string;
+  ownerUsername: string;
+  fromCompany: boolean;
+  title: string;
+  message: string;
+  image: string;
+  total: number;
+  remainingNftIds: string[];
+  claims: GiftClaim[];
+  status: 'active' | 'completed' | 'cancelled';
+  createdAt: string;
+  updatedAt: string;
+};
+export type GiftPreview = {
+  id: string; title: string; message: string; image: string; ownerName: string; ownerUsername: string;
+  fromCompany: boolean; total: number; remaining: number; status: Gift['status'];
+};
+export const apiCreateGift = (d: { nftIds: string[]; title?: string; message?: string }) => post<Gift>('/api/gifts', d);
+export const apiMyGifts    = () => get<{ sent: Gift[]; received: Gift[] }>('/api/gifts');
+export const apiCancelGift = (code: string) => del<Gift>(`/api/gifts/${encodeURIComponent(code)}`);
+export const apiClaimGift  = (code: string) => post<{ gift: Gift; nft: NFT }>(`/api/gifts/${encodeURIComponent(code)}/claim`);
+export const apiGiftPreview = (code: string) => get<GiftPreview>(`/api/public/gifts/${encodeURIComponent(code)}`);

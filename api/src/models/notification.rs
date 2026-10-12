@@ -10,6 +10,7 @@ pub enum NotificationType {
     Welcome,
     Wallet,
     NftCreated,
+    Gift,
     System,
 }
 

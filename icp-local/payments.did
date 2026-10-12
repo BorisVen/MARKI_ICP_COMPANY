@@ -109,7 +109,8 @@ type Pricing = record {
   ledger : principal;
   ledger_fee_e8s : nat64;
 };
-service : {
+type InitArg = record { ledger : opt principal };
+service : (opt InitArg) -> {
   create_listing : (text, nat64) -> (nat64);
   buy : (nat64) -> (BuyResult);
   get_listing : (nat64) -> (opt Listing) query;
@@ -117,6 +118,8 @@ service : {
   receipts : () -> (vec Receipt) query;
   config : () -> (Config) query;
   platform_balance : () -> (nat);
+  withdraw : (Account, nat64) -> (variant { Ok : nat; Err : text });
+  set_ledger : (principal) -> (variant { Ok : nat64; Err : text });
   refresh_rate : () -> (variant { Ok : nat64; Err : text });
   quote_mint : (MintQuoteRequest) -> (variant { Ok : MintQuote; Err : text }) query;
   plans : () -> (variant { Ok : vec PlanQuote; Err : text }) query;

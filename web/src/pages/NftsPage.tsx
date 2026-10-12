@@ -18,6 +18,7 @@ import {
 import { Icon } from '../icons';
 import { useWallet } from '../icp/useWallet';
 import EmptyState from '../EmptyState';
+import CreateGiftModal from '../gifts/CreateGiftModal';
 import { fmtPrice, plural } from '../format';
 import { useSubscription } from '../icp/useSubscription';
 import { friendlyIcpError } from '../icp/errors';
@@ -83,6 +84,7 @@ export default function NftsPage() {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<NFT | null>(null);
   const [qrFor, setQrFor] = useState<NFT | null>(null);
+  const [gifting, setGifting] = useState<NFT[] | null>(null);
   const [generatingQr, setGeneratingQr] = useState(false);
 
   const reload = useCallback(async () => {
@@ -199,6 +201,7 @@ export default function NftsPage() {
                     onEdit={() => setEditing(n)}
                     onDelete={() => onDelete(n.id)}
                     onShowQr={() => setQrFor(n)}
+                    onGift={() => setGifting(n.batchName ? nfts.filter(x => x.batchName === n.batchName) : [n])}
                   />
                 ))}
               </div>
@@ -224,15 +227,17 @@ export default function NftsPage() {
       )}
 
       {qrFor && <QrModal nft={qrFor} onClose={() => setQrFor(null)} />}
+      {gifting && <CreateGiftModal nfts={gifting} onClose={() => setGifting(null)} />}
     </div>
   );
 }
 
-function NftCard({ nft, onEdit, onDelete, onShowQr }: {
+function NftCard({ nft, onEdit, onDelete, onShowQr, onGift }: {
   nft: NFT;
   onEdit: () => void;
   onDelete: () => void;
   onShowQr: () => void;
+  onGift: () => void;
 }) {
   return (
     <div className="card">
@@ -278,6 +283,9 @@ function NftCard({ nft, onEdit, onDelete, onShowQr }: {
         <button className="btn" onClick={onEdit}>Змінити</button>
         <button className="btn" onClick={onShowQr} title="QR-код для упаковки товару">
           <Icon.QrCode /> QR-код
+        </button>
+        <button className="btn" onClick={onGift} title={nft.batchName ? `Подарувати колекцію «${nft.batchName}» клієнтам` : 'Подарувати клієнту'}>
+          <Icon.Gift /> Подарувати
         </button>
         <span className="spacer" />
         <button className="btn ghost-danger" onClick={onDelete} title="Видалити NFT"><Icon.Trash /></button>
@@ -490,7 +498,6 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
             for (let i = 0; i < editionIds.length && i < edMint.tokenIds.length; i++) {
               await apiUpdateNFT(editionIds[i], { mintAddress: icpMintAddress(edMint.tokenIds[i]) });
             }
-            if (edResult?.masterId) await apiUpdateNFT(edResult.masterId, { mintAddress: icpMintAddress(edMint.tokenIds[0]) });
           }
 
           setUploadProgress('Крок 3/3 — Публікація у стрічку…');

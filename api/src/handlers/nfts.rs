@@ -38,7 +38,7 @@ fn collection_title_after_sale(title: &str, remaining: usize) -> String {
 }
 
 /// Load the `nfts` array from `marki_wallets/{uid}`.
-async fn load_nfts(state: &AppState, uid: &str) -> ApiResult<Vec<Nft>> {
+pub(crate) async fn load_nfts(state: &AppState, uid: &str) -> ApiResult<Vec<Nft>> {
     let doc = state
         .firestore
         .get("marki_wallets", uid)
@@ -55,7 +55,7 @@ async fn load_nfts(state: &AppState, uid: &str) -> ApiResult<Vec<Nft>> {
 }
 
 /// Persist the `nfts` array back to `marki_wallets/{uid}`.
-async fn save_nfts(state: &AppState, uid: &str, nfts: &[Nft]) -> ApiResult<()> {
+pub(crate) async fn save_nfts(state: &AppState, uid: &str, nfts: &[Nft]) -> ApiResult<()> {
     state
         .firestore
         .update("marki_wallets", uid, &json!({ "nfts": nfts }))
@@ -332,6 +332,8 @@ pub async fn create_nft(
         batch_index: None,
         batch_size: None,
         qr_image_url: None,
+        gift_from: None,
+        gift_id: None,
     };
 
     let mut nfts = load_nfts(&state, &auth.uid).await?;
@@ -508,6 +510,8 @@ pub async fn batch_create_nfts(
                     batch_index: Some(index as u32),
                     batch_size: Some(batch_size),
                     qr_image_url: None,
+                    gift_from: None,
+                    gift_id: None,
                 };
                 nfts.push(nft);
                 results.push(BatchItemResult {
@@ -643,8 +647,9 @@ pub async fn delete_nft(
 
 /// `POST /api/nfts/editions`
 ///
-/// Creates one Master Edition NFT record plus N print-edition placeholder
-/// records in Firestore, all sharing a single uploaded image and metadata JSON.
+/// Creates N edition records sharing a single uploaded image and metadata JSON.
+/// Solana also gets a Master Edition record (Metaplex); ICP has no such concept,
+/// so there every record is a copy backed by its own canister token.
 ///
 /// The frontend is responsible for the on-chain work:
 ///   1. `createNft(…, { maxSupply: some(N) })` — registers the Master Edition.
@@ -707,6 +712,9 @@ pub async fn create_edition_nfts(
         .and_then(|d| d.get("name")).and_then(|v| v.as_str())
         .unwrap_or("Unknown").to_owned();
 
+    // Master editions are a Metaplex (Solana) concept.
+    let has_master = !req.blockchain.eq_ignore_ascii_case("icp");
+
     // Upload the shared image once.
     let master_id = Uuid::new_v4().to_string();
     let image_url = upload_nft_image(&state, &auth.uid, &master_id, bytes, &image_ct).await?;
@@ -719,7 +727,7 @@ pub async fn create_edition_nfts(
         "image":       image_url,
         "attributes": [
             { "trait_type": "Category",    "value": req.category.as_deref().unwrap_or("Art") },
-            { "trait_type": "Blockchain",  "value": "Solana" },
+            { "trait_type": "Blockchain",  "value": if has_master { "Solana" } else { "ICP" } },
             { "trait_type": "Edition",     "value": format!("1 of {}", edition_count) },
             { "trait_type": "Idenity Platform Resale Fee", "value": "3%" }
         ],
@@ -738,7 +746,7 @@ pub async fn create_edition_nfts(
 
     let now = Utc::now().to_rfc3339();
     let batch_id = Uuid::new_v4().to_string();
-    let batch_size = edition_count + 1;
+    let batch_size = if has_master { edition_count + 1 } else { edition_count };
     let batch_name = req
         .batch_name
         .as_deref()
@@ -774,12 +782,16 @@ pub async fn create_edition_nfts(
         batch_index:    Some(0),
         batch_size:     Some(batch_size),
         qr_image_url: None,
+        gift_from: None,
+        gift_id: None,
     };
 
     // ── Print-edition placeholder records (edition_number = 1..N) ─────────────
     let mut edition_ids: Vec<String> = Vec::with_capacity(edition_count as usize);
     let mut all_nfts = load_nfts(&state, &auth.uid).await?;
-    all_nfts.push(master.clone());
+    if has_master {
+        all_nfts.push(master.clone());
+    }
 
     for n in 1..=edition_count {
         let eid = Uuid::new_v4().to_string();
@@ -788,7 +800,7 @@ pub async fn create_edition_nfts(
             id:             eid,
             title:          format!("{} #{}", req.title, n),
             edition_number: Some(n),
-            master_nft_id:  Some(master_id.clone()),
+            master_nft_id:  has_master.then(|| master_id.clone()),
             batch_index:    Some(n),
             // Inherit everything else from master
             mint_address:   None,
@@ -810,7 +822,7 @@ pub async fn create_edition_nfts(
     notification_helpers::notify_nft_created(&state.firestore, &auth.uid, &req.title).await;
 
     Ok((StatusCode::CREATED, Json(CreateEditionResponse {
-        master_id,
+        master_id: has_master.then_some(master_id),
         metadata_uri,
         image_url,
         edition_ids,

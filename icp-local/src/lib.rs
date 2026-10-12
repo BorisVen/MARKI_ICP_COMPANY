@@ -1,37 +1,39 @@
-//! MarkICP payments test canister.
+//! MarkICP payments canister.
 //!
-//! Flow (ICRC-2, the same pattern the production backend should use):
-//! 1. Seller calls `create_listing(nft_id, price_e8s)`.
-//! 2. Buyer calls `icrc2_approve` on the ICP ledger with this canister as spender
-//!    for `price_e8s + ledger fee`.
-//! 3. Buyer calls `buy(listing_id)`. The canister pulls `price_e8s` from the buyer
-//!    with `icrc2_transfer_from`, keeps the platform fee and pays the seller the rest.
+//! Marketplace (ICRC-2): a seller lists an NFT with `create_listing`, the buyer
+//! approves this canister on the ledger and calls `buy`; the canister pulls the
+//! price into escrow, keeps the platform fee and pays the seller.
 //!
-//! Plans: a company buys a plan (N photo mints + M metadata mints for 30 days)
-//! with `icrc2_approve` + `buy_plan`. Plan prices are in USD and converted to ICP
-//! with the ICP/XDR rate of the cycles minting canister (CMC). The backend spends
-//! credits with `consume_mints` before each mint.
-//!
-//! Cost model: `quote_mint` prices a mint from the cycles measured in
-//! `icp-mint-cost-test`. Use it to check plan margins.
+//! Plans: a company or user buys a plan (N photo mints + M metadata mints for 30
+//! days) with `icrc2_approve` + `buy_plan`. Prices are in USD and converted to the
+//! ledger token with the ICP/XDR rate of the cycles minting canister (CMC).
 //!
 //! NFTs: ICRC-7 subset. `mint_uploaded` / `mint_metadata` take plan credits and
 //! mint in the same call; images are stored in the canister.
 //!
-//! State lives in heap memory: this canister is for local testing only.
+//! Storage: everything that must survive upgrades lives in stable memory
+//! (`ic-stable-structures`). Only in-progress photo uploads and the cached
+//! ICP/XDR rate are heap-only; an upgrade drops them and nothing else.
+//!
+//! The ledger is chosen at install time (`InitArg.ledger`, default ICP) so the
+//! same code runs on TESTICP for mainnet tests and on ICP for production.
 
 use candid::{CandidType, Nat, Principal};
 use ic_cdk::call::Call;
 use ic_cdk::{query, update};
+use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
+use ic_stable_structures::storable::{Bound, Storable};
+use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 const ICP_LEDGER: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
-const LEDGER_FEE_E8S: u64 = 10_000;
+const DEFAULT_LEDGER_FEE_E8S: u64 = 10_000;
 /// 250 basis points = 2.5 %.
 const PLATFORM_FEE_BPS: u16 = 250;
 
@@ -56,7 +58,136 @@ const XDR_USD: f64 = 1.36643;
 /// Approx. metadata stored with every NFT.
 const METADATA_BYTES: u64 = 100;
 
-#[derive(CandidType, Deserialize, Clone)]
+// ── Stable storage ──────────────────────────────────────────────────────────
+
+type Memory = VirtualMemory<DefaultMemoryImpl>;
+
+/// CBOR-encoded, unbounded: new optional fields can be added later without
+/// breaking stored records.
+macro_rules! cbor_storable {
+    ($($t:ty),* $(,)?) => {$(
+        impl Storable for $t {
+            const BOUND: Bound = Bound::Unbounded;
+            fn to_bytes(&self) -> Cow<'_, [u8]> {
+                let mut buf = vec![];
+                ciborium::into_writer(self, &mut buf).expect("encode");
+                Cow::Owned(buf)
+            }
+            fn into_bytes(self) -> Vec<u8> {
+                let mut buf = vec![];
+                ciborium::into_writer(&self, &mut buf).expect("encode");
+                buf
+            }
+            fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+                ciborium::from_reader(bytes.as_ref()).expect("decode")
+            }
+        }
+    )*};
+}
+
+/// Small singleton state: ledger, fee and id counters.
+#[derive(Serialize, Deserialize, Clone)]
+struct Settings {
+    ledger: Principal,
+    ledger_fee_e8s: u64,
+    next_listing: u64,
+    next_receipt: u64,
+    next_purchase: u64,
+    next_token: u64,
+    next_image: u64,
+    image_bytes: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            ledger: Principal::from_text(ICP_LEDGER).unwrap(),
+            ledger_fee_e8s: DEFAULT_LEDGER_FEE_E8S,
+            next_listing: 0,
+            next_receipt: 0,
+            next_purchase: 0,
+            next_token: 0,
+            next_image: 0,
+            image_bytes: 0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct PlanList(Vec<Plan>);
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Image(#[serde(with = "serde_bytes")] Vec<u8>);
+
+cbor_storable!(Settings, PlanList, Image, Listing, Receipt, Subscription, PlanPurchase, Token);
+
+// Each structure owns one MemoryId. Never reuse or renumber them.
+const MEM_SETTINGS: MemoryId = MemoryId::new(0);
+const MEM_PLANS: MemoryId = MemoryId::new(1);
+const MEM_LISTINGS: MemoryId = MemoryId::new(2);
+const MEM_RECEIPTS: MemoryId = MemoryId::new(3);
+const MEM_SUBSCRIPTIONS: MemoryId = MemoryId::new(4);
+const MEM_PURCHASES: MemoryId = MemoryId::new(5);
+const MEM_TOKENS: MemoryId = MemoryId::new(6);
+const MEM_IMAGES: MemoryId = MemoryId::new(7);
+const MEM_OWNER_TOKENS: MemoryId = MemoryId::new(8);
+
+thread_local! {
+    static MM: RefCell<MemoryManager<DefaultMemoryImpl>> =
+        RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
+
+    static SETTINGS: RefCell<StableCell<Settings, Memory>> =
+        RefCell::new(StableCell::init(mem(MEM_SETTINGS), Settings::default()));
+    static PLANS: RefCell<StableCell<PlanList, Memory>> =
+        RefCell::new(StableCell::init(mem(MEM_PLANS), PlanList::default()));
+    static LISTINGS: RefCell<StableBTreeMap<u64, Listing, Memory>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_LISTINGS)));
+    static RECEIPTS: RefCell<StableBTreeMap<u64, Receipt, Memory>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_RECEIPTS)));
+    /// principal text -> subscription
+    static SUBSCRIPTIONS: RefCell<StableBTreeMap<String, Subscription, Memory>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_SUBSCRIPTIONS)));
+    static PURCHASES: RefCell<StableBTreeMap<u64, PlanPurchase, Memory>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_PURCHASES)));
+    static TOKENS: RefCell<StableBTreeMap<u64, Token, Memory>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_TOKENS)));
+    static IMAGES: RefCell<StableBTreeMap<u64, Image, Memory>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_IMAGES)));
+    /// "<owner principal>#<token id, 20 digits>" -> () : tokens of an owner, in id order.
+    static OWNER_TOKENS: RefCell<StableBTreeMap<String, (), Memory>> =
+        RefCell::new(StableBTreeMap::init(mem(MEM_OWNER_TOKENS)));
+
+    // Heap only: cheap to lose on upgrade.
+    static RATE: RefCell<Rate> = RefCell::new(Rate::default());
+    static UPLOADS: RefCell<BTreeMap<u64, Upload>> = RefCell::new(BTreeMap::new());
+    static NEXT_UPLOAD: RefCell<u64> = const { RefCell::new(0) };
+}
+
+fn mem(id: MemoryId) -> Memory {
+    MM.with(|m| m.borrow().get(id))
+}
+
+fn settings() -> Settings {
+    SETTINGS.with(|s| s.borrow().get().clone())
+}
+
+fn update_settings<R>(f: impl FnOnce(&mut Settings) -> R) -> R {
+    SETTINGS.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let mut s = cell.get().clone();
+        let r = f(&mut s);
+        cell.set(s);
+        r
+    })
+}
+
+fn owner_key(owner: &Principal, token: u64) -> String {
+    format!("{}#{:020}", owner.to_text(), token)
+}
+
+// ── Types ───────────────────────────────────────────────────────────────────
+
+#[derive(CandidType, Serialize, Deserialize, Clone)]
 struct Listing {
     id: u64,
     nft_id: String,
@@ -65,7 +196,7 @@ struct Listing {
     sold: bool,
 }
 
-#[derive(CandidType, Deserialize, Clone)]
+#[derive(CandidType, Serialize, Deserialize, Clone)]
 struct Receipt {
     listing_id: u64,
     nft_id: String,
@@ -84,6 +215,12 @@ struct Config {
     ledger: Principal,
     ledger_fee_e8s: u64,
     platform_fee_bps: u16,
+}
+
+#[derive(CandidType, Deserialize, Default)]
+struct InitArg {
+    /// Ledger for all payments. Default: ICP. TESTICP for mainnet tests.
+    ledger: Option<Principal>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Copy, PartialEq)]
@@ -151,39 +288,42 @@ struct Rate {
     fetched_ns: u64,
 }
 
-#[derive(Default)]
-struct State {
-    next_id: u64,
-    listings: BTreeMap<u64, Listing>,
-    receipts: Vec<Receipt>,
-    rate: Rate,
-    plans: Vec<Plan>,
-    subscriptions: BTreeMap<Principal, Subscription>,
-    purchases: Vec<PlanPurchase>,
-    next_token: u64,
-    next_image: u64,
-    next_upload: u64,
-    tokens: BTreeMap<u64, Token>,
-    images: BTreeMap<u64, Vec<u8>>,
-    uploads: BTreeMap<u64, Upload>,
-}
-
-thread_local! {
-    static STATE: RefCell<State> = RefCell::new(State::default());
-}
-
 fn ledger_id() -> Principal {
-    Principal::from_text(ICP_LEDGER).unwrap()
+    settings().ledger
+}
+
+fn ledger_fee() -> u64 {
+    settings().ledger_fee_e8s
 }
 
 fn account(owner: Principal) -> Account {
     Account { owner, subaccount: None }
 }
 
+fn require_controller() -> Result<(), String> {
+    if ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
+        Ok(())
+    } else {
+        Err("only a controller can call this".into())
+    }
+}
+
+fn caller_not_anonymous() -> Result<Principal, String> {
+    let caller = ic_cdk::api::msg_caller();
+    if caller == Principal::anonymous() {
+        return Err("connect a wallet: anonymous caller".into());
+    }
+    Ok(caller)
+}
+
+// ── Marketplace ─────────────────────────────────────────────────────────────
+
 fn set_sold(id: u64, sold: bool) {
-    STATE.with_borrow_mut(|s| {
-        if let Some(l) = s.listings.get_mut(&id) {
+    LISTINGS.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some(mut l) = m.get(&id) {
             l.sold = sold;
+            m.insert(id, l);
         }
     });
 }
@@ -195,15 +335,16 @@ fn create_listing(nft_id: String, price_e8s: u64) -> u64 {
         ic_cdk::trap("anonymous caller cannot create listings");
     }
     // The seller payout must cover the ledger fee the canister pays.
-    if price_e8s <= LEDGER_FEE_E8S * 2 {
+    if price_e8s <= ledger_fee() * 2 {
         ic_cdk::trap("price too low");
     }
-    STATE.with_borrow_mut(|s| {
-        let id = s.next_id;
-        s.next_id += 1;
-        s.listings.insert(id, Listing { id, nft_id, seller, price_e8s, sold: false });
+    let id = update_settings(|s| {
+        let id = s.next_listing;
+        s.next_listing += 1;
         id
-    })
+    });
+    LISTINGS.with(|m| m.borrow_mut().insert(id, Listing { id, nft_id, seller, price_e8s, sold: false }));
+    id
 }
 
 #[update]
@@ -214,8 +355,9 @@ async fn buy(listing_id: u64) -> Result<Receipt, String> {
     }
 
     // Lock the listing before any await so a second `buy` cannot pay for it too.
-    let listing = STATE.with_borrow_mut(|s| {
-        let l = s.listings.get_mut(&listing_id).ok_or("listing not found")?;
+    let listing = LISTINGS.with(|m| {
+        let mut m = m.borrow_mut();
+        let mut l = m.get(&listing_id).ok_or("listing not found")?;
         if l.sold {
             return Err("listing already sold");
         }
@@ -223,11 +365,13 @@ async fn buy(listing_id: u64) -> Result<Receipt, String> {
             return Err("seller cannot buy own listing");
         }
         l.sold = true;
-        Ok(l.clone())
+        m.insert(listing_id, l.clone());
+        Ok(l)
     })?;
 
     let now = ic_cdk::api::time();
     let me = ic_cdk::api::canister_self();
+    let fee = ledger_fee();
 
     // 1. Pull the full price from the buyer into this canister (escrow).
     let pull = TransferFromArgs {
@@ -235,7 +379,7 @@ async fn buy(listing_id: u64) -> Result<Receipt, String> {
         from: account(buyer),
         to: account(me),
         amount: Nat::from(listing.price_e8s),
-        fee: Some(Nat::from(LEDGER_FEE_E8S)),
+        fee: Some(Nat::from(fee)),
         memo: None,
         created_at_time: Some(now),
     };
@@ -243,10 +387,7 @@ async fn buy(listing_id: u64) -> Result<Receipt, String> {
         .with_arg(pull)
         .await
         .map_err(|e| format!("ledger call failed: {e:?}"))
-        .and_then(|r| {
-            r.candid::<Result<Nat, TransferFromError>>()
-                .map_err(|e| format!("decode failed: {e:?}"))
-        });
+        .and_then(|r| r.candid::<Result<Nat, TransferFromError>>().map_err(|e| format!("decode failed: {e:?}")));
     let pull_block = match pull_result {
         Ok(Ok(block)) => block,
         Ok(Err(e)) => {
@@ -254,11 +395,9 @@ async fn buy(listing_id: u64) -> Result<Receipt, String> {
             return Err(match e {
                 TransferFromError::InsufficientAllowance { allowance } => format!(
                     "insufficient allowance: {allowance} e8s, need {} e8s (price + fee)",
-                    listing.price_e8s + LEDGER_FEE_E8S
+                    listing.price_e8s + fee
                 ),
-                TransferFromError::InsufficientFunds { balance } => {
-                    format!("insufficient funds: {balance} e8s")
-                }
+                TransferFromError::InsufficientFunds { balance } => format!("insufficient funds: {balance} e8s"),
                 other => format!("transfer_from error: {other:?}"),
             });
         }
@@ -270,12 +409,12 @@ async fn buy(listing_id: u64) -> Result<Receipt, String> {
 
     // 2. Pay the seller: price minus platform fee minus the ledger fee for this transfer.
     let platform_fee = listing.price_e8s * PLATFORM_FEE_BPS as u64 / 10_000;
-    let seller_got = listing.price_e8s - platform_fee - LEDGER_FEE_E8S;
+    let seller_got = listing.price_e8s - platform_fee - fee;
     let payout = TransferArg {
         from_subaccount: None,
         to: account(listing.seller),
         amount: Nat::from(seller_got),
-        fee: Some(Nat::from(LEDGER_FEE_E8S)),
+        fee: Some(Nat::from(fee)),
         memo: None,
         created_at_time: Some(now),
     };
@@ -283,16 +422,11 @@ async fn buy(listing_id: u64) -> Result<Receipt, String> {
         .with_arg(payout)
         .await
         .map_err(|e| format!("ledger call failed: {e:?}"))
-        .and_then(|r| {
-            r.candid::<Result<Nat, TransferError>>()
-                .map_err(|e| format!("decode failed: {e:?}"))
-        });
+        .and_then(|r| r.candid::<Result<Nat, TransferError>>().map_err(|e| format!("decode failed: {e:?}")));
     let payout_block = match payout_result {
         Ok(Ok(block)) => block,
         // Funds are already in escrow: keep the listing sold and report it.
-        Ok(Err(e)) => {
-            return Err(format!("paid (block {pull_block}) but seller payout failed: {e:?}"))
-        }
+        Ok(Err(e)) => return Err(format!("paid (block {pull_block}) but seller payout failed: {e:?}")),
         Err(e) => return Err(format!("paid (block {pull_block}) but seller payout failed: {e}")),
     };
 
@@ -308,43 +442,98 @@ async fn buy(listing_id: u64) -> Result<Receipt, String> {
         payout_block,
         timestamp_ns: now,
     };
-    STATE.with_borrow_mut(|s| s.receipts.push(receipt.clone()));
+    let id = update_settings(|s| {
+        let id = s.next_receipt;
+        s.next_receipt += 1;
+        id
+    });
+    RECEIPTS.with(|m| m.borrow_mut().insert(id, receipt.clone()));
     Ok(receipt)
 }
 
 #[query]
 fn get_listing(id: u64) -> Option<Listing> {
-    STATE.with_borrow(|s| s.listings.get(&id).cloned())
+    LISTINGS.with(|m| m.borrow().get(&id))
 }
 
 #[query]
 fn list_listings() -> Vec<Listing> {
-    STATE.with_borrow(|s| s.listings.values().cloned().collect())
+    LISTINGS.with(|m| m.borrow().iter().map(|e| e.value()).collect())
 }
 
 #[query]
 fn receipts() -> Vec<Receipt> {
-    STATE.with_borrow(|s| s.receipts.clone())
+    RECEIPTS.with(|m| m.borrow().iter().map(|e| e.value()).collect())
 }
 
 #[query]
 fn config() -> Config {
-    Config {
-        ledger: ledger_id(),
-        ledger_fee_e8s: LEDGER_FEE_E8S,
-        platform_fee_bps: PLATFORM_FEE_BPS,
-    }
+    let s = settings();
+    Config { ledger: s.ledger, ledger_fee_e8s: s.ledger_fee_e8s, platform_fee_bps: PLATFORM_FEE_BPS }
 }
 
-/// ICP held by this canister (collected platform fees).
-#[update]
-async fn platform_balance() -> Nat {
+async fn ledger_balance() -> Result<Nat, String> {
     Call::unbounded_wait(ledger_id(), "icrc1_balance_of")
         .with_arg(account(ic_cdk::api::canister_self()))
         .await
-        .expect("icrc1_balance_of failed")
+        .map_err(|e| format!("icrc1_balance_of failed: {e:?}"))?
         .candid::<Nat>()
-        .expect("decode failed")
+        .map_err(|e| format!("decode failed: {e:?}"))
+}
+
+/// Tokens held by this canister (paid plans and platform fees).
+#[update]
+async fn platform_balance() -> Nat {
+    ledger_balance().await.unwrap_or_default()
+}
+
+/// Sends tokens held by this canister to `to`. Controller only.
+/// `amount_e8s` is what `to` receives; the ledger fee is paid on top.
+#[update]
+async fn withdraw(to: Account, amount_e8s: u64) -> Result<Nat, String> {
+    require_controller()?;
+    if amount_e8s == 0 {
+        return Err("amount must be positive".into());
+    }
+    let fee = ledger_fee();
+    let args = TransferArg {
+        from_subaccount: None,
+        to,
+        amount: Nat::from(amount_e8s),
+        fee: Some(Nat::from(fee)),
+        memo: None,
+        created_at_time: Some(ic_cdk::api::time()),
+    };
+    Call::unbounded_wait(ledger_id(), "icrc1_transfer")
+        .with_arg(args)
+        .await
+        .map_err(|e| format!("ledger call failed: {e:?}"))?
+        .candid::<Result<Nat, TransferError>>()
+        .map_err(|e| format!("decode failed: {e:?}"))?
+        .map_err(|e| match e {
+            TransferError::InsufficientFunds { balance } => format!("insufficient funds: {balance} e8s (fee {fee} e8s is extra)"),
+            TransferError::BadFee { expected_fee } => format!("ledger fee changed to {expected_fee}; call refresh_rate and retry"),
+            other => format!("transfer error: {other:?}"),
+        })
+}
+
+/// Switches the payment ledger (e.g. TESTICP -> ICP) and reloads its fee. Controller only.
+#[update]
+async fn set_ledger(ledger: Principal) -> Result<u64, String> {
+    require_controller()?;
+    update_settings(|s| s.ledger = ledger);
+    refresh_fee().await
+}
+
+async fn refresh_fee() -> Result<u64, String> {
+    let fee = Call::unbounded_wait(ledger_id(), "icrc1_fee")
+        .await
+        .map_err(|e| format!("icrc1_fee failed: {e:?}"))?
+        .candid::<Nat>()
+        .map_err(|e| format!("decode failed: {e:?}"))?;
+    let fee: u64 = fee.0.to_string().parse().map_err(|_| "fee too large".to_string())?;
+    update_settings(|s| s.ledger_fee_e8s = fee);
+    Ok(fee)
 }
 
 // ── Mint pricing ────────────────────────────────────────────────────────────
@@ -395,7 +584,7 @@ fn build_quote(req: &MintQuoteRequest, rate: Rate) -> Result<MintQuote, String> 
 }
 
 async fn fresh_rate() -> Result<Rate, String> {
-    let cached = STATE.with_borrow(|s| s.rate);
+    let cached = RATE.with(|r| *r.borrow());
     let now = ic_cdk::api::time();
     if cached.xdr_permyriad_per_icp > 0 && now - cached.fetched_ns < RATE_MAX_AGE_NS {
         return Ok(cached);
@@ -410,11 +599,13 @@ async fn fresh_rate() -> Result<Rate, String> {
         timestamp_seconds: res.data.timestamp_seconds,
         fetched_ns: now,
     };
-    STATE.with_borrow_mut(|s| s.rate = rate);
+    RATE.with(|r| *r.borrow_mut() = rate);
+    // Keep the ledger fee current too; a failure here must not block pricing.
+    let _ = refresh_fee().await;
     Ok(rate)
 }
 
-/// Loads the ICP/XDR rate from the CMC (cached for 10 minutes).
+/// Loads the ICP/XDR rate from the CMC (cached for 10 minutes) and the ledger fee.
 #[update]
 async fn refresh_rate() -> Result<u64, String> {
     fresh_rate().await.map(|r| r.xdr_permyriad_per_icp)
@@ -423,7 +614,7 @@ async fn refresh_rate() -> Result<u64, String> {
 /// Prices a mint job with the cached rate. Call `refresh_rate` first.
 #[query]
 fn quote_mint(req: MintQuoteRequest) -> Result<MintQuote, String> {
-    build_quote(&req, STATE.with_borrow(|s| s.rate))
+    build_quote(&req, RATE.with(|r| *r.borrow()))
 }
 
 // ── Plans ───────────────────────────────────────────────────────────────────
@@ -433,7 +624,7 @@ const XDR_USD_MICROS: u128 = 1_366_430;
 const NS_PER_DAY: u64 = 24 * 3600 * 1_000_000_000;
 
 /// A package a company buys: N mints of each kind for `period_days`.
-#[derive(CandidType, Deserialize, Clone)]
+#[derive(CandidType, Serialize, Deserialize, Clone)]
 struct Plan {
     id: String,
     name: String,
@@ -455,7 +646,7 @@ struct PlanQuote {
     max_cost_cycles: Nat,
 }
 
-#[derive(CandidType, Deserialize, Clone)]
+#[derive(CandidType, Serialize, Deserialize, Clone)]
 struct Subscription {
     owner: Principal,
     plan_id: String,
@@ -465,7 +656,7 @@ struct Subscription {
     expires_at_ns: u64,
 }
 
-#[derive(CandidType, Deserialize, Clone)]
+#[derive(CandidType, Serialize, Deserialize, Clone)]
 struct PlanPurchase {
     id: u64,
     buyer: Principal,
@@ -500,7 +691,7 @@ fn default_plans() -> Vec<Plan> {
 }
 
 fn find_plan(id: &str) -> Result<Plan, String> {
-    STATE.with_borrow(|s| s.plans.iter().find(|p| p.id == id).cloned())
+    PLANS.with(|p| p.borrow().get().0.iter().find(|p| p.id == id).cloned())
         .ok_or_else(|| format!("plan {id} not found"))
 }
 
@@ -531,18 +722,11 @@ fn build_plan_quote(plan: Plan, rate: Rate) -> Result<PlanQuote, String> {
     })
 }
 
-fn require_controller() -> Result<(), String> {
-    if ic_cdk::api::is_controller(&ic_cdk::api::msg_caller()) {
-        Ok(())
-    } else {
-        Err("only a controller can call this".into())
-    }
-}
-
 /// All plans priced in ICP with the cached rate. Call `refresh_rate` first.
 #[query]
 fn plans() -> Result<Vec<PlanQuote>, String> {
-    let (plans, rate) = STATE.with_borrow(|s| (s.plans.clone(), s.rate));
+    let plans = PLANS.with(|p| p.borrow().get().0.clone());
+    let rate = RATE.with(|r| *r.borrow());
     plans.into_iter().map(|p| build_plan_quote(p, rate)).collect()
 }
 
@@ -550,7 +734,9 @@ fn plans() -> Result<Vec<PlanQuote>, String> {
 #[update]
 fn set_plans(plans: Vec<Plan>) -> Result<(), String> {
     require_controller()?;
-    STATE.with_borrow_mut(|s| s.plans = plans);
+    PLANS.with(|p| {
+        p.borrow_mut().set(PlanList(plans));
+    });
     Ok(())
 }
 
@@ -566,19 +752,17 @@ async fn buy_plan(plan_id: String, max_price_e8s: u64) -> Result<Subscription, S
     }
     let quote = build_plan_quote(find_plan(&plan_id)?, fresh_rate().await?)?;
     if quote.price_e8s > max_price_e8s {
-        return Err(format!(
-            "price changed: {} e8s, max allowed {max_price_e8s} e8s",
-            quote.price_e8s
-        ));
+        return Err(format!("price changed: {} e8s, max allowed {max_price_e8s} e8s", quote.price_e8s));
     }
 
     let now = ic_cdk::api::time();
+    let fee = ledger_fee();
     let args = TransferFromArgs {
         spender_subaccount: None,
         from: account(buyer),
         to: account(ic_cdk::api::canister_self()),
         amount: Nat::from(quote.price_e8s),
-        fee: Some(Nat::from(LEDGER_FEE_E8S)),
+        fee: Some(Nat::from(fee)),
         memo: None,
         created_at_time: Some(now),
     };
@@ -591,64 +775,69 @@ async fn buy_plan(plan_id: String, max_price_e8s: u64) -> Result<Subscription, S
         .map_err(|e| match e {
             TransferFromError::InsufficientAllowance { allowance } => format!(
                 "insufficient allowance: {allowance} e8s, need {} e8s (price + fee)",
-                quote.price_e8s + LEDGER_FEE_E8S
+                quote.price_e8s + fee
             ),
-            TransferFromError::InsufficientFunds { balance } => {
-                format!("insufficient funds: {balance} e8s")
-            }
+            TransferFromError::InsufficientFunds { balance } => format!("insufficient funds: {balance} e8s"),
             other => format!("transfer_from error: {other:?}"),
         })?;
 
     let plan = quote.plan;
-    let sub = STATE.with_borrow_mut(|s| {
-        s.purchases.push(PlanPurchase {
-            id: s.purchases.len() as u64,
+    let purchase_id = update_settings(|s| {
+        let id = s.next_purchase;
+        s.next_purchase += 1;
+        id
+    });
+    PURCHASES.with(|m| {
+        m.borrow_mut().insert(purchase_id, PlanPurchase {
+            id: purchase_id,
             buyer,
             plan_id: plan.id.clone(),
             price_e8s: quote.price_e8s,
             block,
             timestamp_ns: now,
-        });
-        let period = plan.period_days as u64 * NS_PER_DAY;
-        let sub = s.subscriptions.entry(buyer).or_insert(Subscription {
-            owner: buyer,
-            plan_id: plan.id.clone(),
-            photo_mints_left: 0,
-            metadata_mints_left: 0,
-            max_photo_kb: 0,
-            expires_at_ns: now,
-        });
-        if sub.expires_at_ns <= now {
-            // Expired credits do not carry over.
-            sub.photo_mints_left = 0;
-            sub.metadata_mints_left = 0;
-            sub.expires_at_ns = now;
-        }
-        sub.plan_id = plan.id.clone();
-        sub.photo_mints_left += plan.photo_mints;
-        sub.metadata_mints_left += plan.metadata_mints;
-        sub.max_photo_kb = sub.max_photo_kb.max(plan.max_photo_kb);
-        sub.expires_at_ns += period;
-        sub.clone()
+        })
     });
+
+    let key = buyer.to_text();
+    let mut sub = SUBSCRIPTIONS.with(|m| m.borrow().get(&key)).unwrap_or(Subscription {
+        owner: buyer,
+        plan_id: plan.id.clone(),
+        photo_mints_left: 0,
+        metadata_mints_left: 0,
+        max_photo_kb: 0,
+        expires_at_ns: now,
+    });
+    if sub.expires_at_ns <= now {
+        // Expired credits do not carry over.
+        sub.photo_mints_left = 0;
+        sub.metadata_mints_left = 0;
+        sub.expires_at_ns = now;
+    }
+    sub.plan_id = plan.id.clone();
+    sub.photo_mints_left += plan.photo_mints;
+    sub.metadata_mints_left += plan.metadata_mints;
+    sub.max_photo_kb = sub.max_photo_kb.max(plan.max_photo_kb);
+    sub.expires_at_ns += plan.period_days as u64 * NS_PER_DAY;
+    SUBSCRIPTIONS.with(|m| m.borrow_mut().insert(key, sub.clone()));
     Ok(sub)
 }
 
 #[query]
 fn subscription_of(owner: Principal) -> Option<Subscription> {
-    STATE.with_borrow(|s| s.subscriptions.get(&owner).cloned())
+    SUBSCRIPTIONS.with(|m| m.borrow().get(&owner.to_text()))
 }
 
 #[query]
 fn purchases_of(owner: Principal) -> Vec<PlanPurchase> {
-    STATE.with_borrow(|s| s.purchases.iter().filter(|p| p.buyer == owner).cloned().collect())
+    PURCHASES.with(|m| m.borrow().iter().map(|e| e.value()).filter(|p| p.buyer == owner).collect())
 }
 
 /// Checks the plan of `owner` and takes `count` credits of `kind`.
 /// `bytes` is the photo size, checked against the plan limit.
-fn spend_credits(s: &mut State, owner: Principal, kind: UsageKind, count: u64, bytes: u64) -> Result<Subscription, String> {
+fn spend_credits(owner: Principal, kind: UsageKind, count: u64, bytes: u64) -> Result<Subscription, String> {
     let now = ic_cdk::api::time();
-    let sub = s.subscriptions.get_mut(&owner).ok_or("no plan: buy a plan first")?;
+    let key = owner.to_text();
+    let mut sub = SUBSCRIPTIONS.with(|m| m.borrow().get(&key)).ok_or("no plan: buy a plan first")?;
     if sub.expires_at_ns <= now {
         return Err("plan expired".into());
     }
@@ -665,14 +854,15 @@ fn spend_credits(s: &mut State, owner: Principal, kind: UsageKind, count: u64, b
         return Err(format!("not enough mints: {} left, need {count}", *left));
     }
     *left -= count;
-    Ok(sub.clone())
+    SUBSCRIPTIONS.with(|m| m.borrow_mut().insert(key, sub.clone()));
+    Ok(sub)
 }
 
 /// Spends plan credits for a mint done elsewhere. Controller only (MarkICP backend).
 #[update]
 fn consume_mints(owner: Principal, kind: UsageKind, count: u64, bytes: u64) -> Result<Subscription, String> {
     require_controller()?;
-    STATE.with_borrow_mut(|s| spend_credits(s, owner, kind, count, bytes))
+    spend_credits(owner, kind, count, bytes)
 }
 
 // ── NFTs (ICRC-7 subset) ────────────────────────────────────────────────────
@@ -685,7 +875,7 @@ fn consume_mints(owner: Principal, kind: UsageKind, count: u64, bytes: u64) -> R
 const MAX_METADATA_BYTES: usize = 8 * 1024;
 const MAX_COPIES: u32 = 1_000;
 
-#[derive(CandidType, Deserialize, Clone)]
+#[derive(CandidType, Serialize, Deserialize, Clone)]
 struct Token {
     owner: Principal,
     metadata: String,
@@ -721,14 +911,6 @@ enum Value {
     Text(String),
 }
 
-fn caller_not_anonymous() -> Result<Principal, String> {
-    let caller = ic_cdk::api::msg_caller();
-    if caller == Principal::anonymous() {
-        return Err("connect a wallet: anonymous caller".into());
-    }
-    Ok(caller)
-}
-
 fn check_metadata(metadata: &str) -> Result<(), String> {
     if metadata.len() > MAX_METADATA_BYTES {
         return Err(format!("metadata over {MAX_METADATA_BYTES} bytes"));
@@ -736,30 +918,51 @@ fn check_metadata(metadata: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn insert_tokens(owner: Principal, metadata: Vec<String>, image_id: Option<u64>, now: u64) -> Vec<u64> {
+    let first = update_settings(|s| {
+        let first = s.next_token;
+        s.next_token += metadata.len() as u64;
+        first
+    });
+    metadata
+        .into_iter()
+        .enumerate()
+        .map(|(i, metadata)| {
+            let id = first + i as u64;
+            TOKENS.with(|m| m.borrow_mut().insert(id, Token { owner, metadata, image_id, minted_at_ns: now }));
+            OWNER_TOKENS.with(|m| m.borrow_mut().insert(owner_key(&owner, id), ()));
+            id
+        })
+        .collect()
+}
+
 #[update]
 fn create_upload() -> Result<u64, String> {
     let owner = caller_not_anonymous()?;
     let now = ic_cdk::api::time();
-    STATE.with_borrow_mut(|s| {
-        // Uploads cost cycles too: only callers with photo credits may start one.
-        match s.subscriptions.get(&owner) {
-            Some(sub) if sub.expires_at_ns > now && sub.photo_mints_left > 0 => {}
-            _ => return Err("no active plan with photo mints: buy a plan first".into()),
-        }
-        let id = s.next_upload;
-        s.next_upload += 1;
-        s.uploads.insert(id, Upload { owner, bytes: Vec::new() });
-        Ok(id)
-    })
+    // Uploads cost cycles too: only callers with photo credits may start one.
+    match SUBSCRIPTIONS.with(|m| m.borrow().get(&owner.to_text())) {
+        Some(sub) if sub.expires_at_ns > now && sub.photo_mints_left > 0 => {}
+        _ => return Err("no active plan with photo mints: buy a plan first".into()),
+    }
+    let id = NEXT_UPLOAD.with(|n| {
+        let mut n = n.borrow_mut();
+        let id = *n;
+        *n += 1;
+        id
+    });
+    UPLOADS.with(|u| u.borrow_mut().insert(id, Upload { owner, bytes: Vec::new() }));
+    Ok(id)
 }
 
 /// Appends a chunk; returns the upload size so far.
 #[update]
 fn append_chunk(upload_id: u64, chunk: serde_bytes::ByteBuf) -> Result<u64, String> {
     let caller = caller_not_anonymous()?;
-    STATE.with_borrow_mut(|s| {
-        let limit = s.subscriptions.get(&caller).map(|sub| sub.max_photo_kb * 1024).unwrap_or(0);
-        let up = s.uploads.get_mut(&upload_id).ok_or("upload not found")?;
+    let limit = SUBSCRIPTIONS.with(|m| m.borrow().get(&caller.to_text())).map(|s| s.max_photo_kb * 1024).unwrap_or(0);
+    UPLOADS.with(|u| {
+        let mut u = u.borrow_mut();
+        let up = u.get_mut(&upload_id).ok_or("upload not found")?;
         if up.owner != caller {
             return Err("not your upload".into());
         }
@@ -778,33 +981,31 @@ fn mint_uploaded(upload_id: u64, metadata: String, copies: u32) -> Result<MintRe
     if copies == 0 || copies > MAX_COPIES {
         return Err(format!("copies must be 1..={MAX_COPIES}"));
     }
-    let now = ic_cdk::api::time();
-    STATE.with_borrow_mut(|s| {
-        let up = s.uploads.get(&upload_id).ok_or("upload not found")?;
+    let size = UPLOADS.with(|u| {
+        let u = u.borrow();
+        let up = u.get(&upload_id).ok_or("upload not found")?;
         if up.owner != owner {
-            return Err("not your upload".into());
+            return Err("not your upload".to_string());
         }
         if up.bytes.is_empty() {
-            return Err("upload is empty".into());
+            return Err("upload is empty".to_string());
         }
-        let size = up.bytes.len() as u64;
-        let subscription = spend_credits(s, owner, UsageKind::Photo, copies as u64, size)?;
+        Ok(up.bytes.len() as u64)
+    })?;
+    let subscription = spend_credits(owner, UsageKind::Photo, copies as u64, size)?;
 
-        let bytes = s.uploads.remove(&upload_id).unwrap().bytes;
-        let image_id = s.next_image;
+    let bytes = UPLOADS.with(|u| u.borrow_mut().remove(&upload_id)).unwrap().bytes;
+    let image_id = update_settings(|s| {
+        let id = s.next_image;
         s.next_image += 1;
-        s.images.insert(image_id, bytes);
+        s.image_bytes += size;
+        id
+    });
+    IMAGES.with(|m| m.borrow_mut().insert(image_id, Image(bytes)));
 
-        let token_ids = (0..copies)
-            .map(|_| {
-                let id = s.next_token;
-                s.next_token += 1;
-                s.tokens.insert(id, Token { owner, metadata: metadata.clone(), image_id: Some(image_id), minted_at_ns: now });
-                id
-            })
-            .collect();
-        Ok(MintResult { token_ids, image_bytes: size, subscription })
-    })
+    let now = ic_cdk::api::time();
+    let token_ids = insert_tokens(owner, vec![metadata; copies as usize], Some(image_id), now);
+    Ok(MintResult { token_ids, image_bytes: size, subscription })
 }
 
 /// Mints metadata-only NFTs, one per entry.
@@ -817,20 +1018,9 @@ fn mint_metadata(items: Vec<String>) -> Result<MintResult, String> {
     for m in &items {
         check_metadata(m)?;
     }
-    let now = ic_cdk::api::time();
-    STATE.with_borrow_mut(|s| {
-        let subscription = spend_credits(s, owner, UsageKind::Metadata, items.len() as u64, 0)?;
-        let token_ids = items
-            .into_iter()
-            .map(|metadata| {
-                let id = s.next_token;
-                s.next_token += 1;
-                s.tokens.insert(id, Token { owner, metadata, image_id: None, minted_at_ns: now });
-                id
-            })
-            .collect();
-        Ok(MintResult { token_ids, image_bytes: 0, subscription })
-    })
+    let subscription = spend_credits(owner, UsageKind::Metadata, items.len() as u64, 0)?;
+    let token_ids = insert_tokens(owner, items, None, ic_cdk::api::time());
+    Ok(MintResult { token_ids, image_bytes: 0, subscription })
 }
 
 #[query]
@@ -845,7 +1035,7 @@ fn icrc7_symbol() -> String {
 
 #[query]
 fn icrc7_total_supply() -> Nat {
-    Nat::from(STATE.with_borrow(|s| s.tokens.len()))
+    Nat::from(TOKENS.with(|m| m.borrow().len()))
 }
 
 fn nat_to_u64(n: &Nat) -> Option<u64> {
@@ -854,84 +1044,86 @@ fn nat_to_u64(n: &Nat) -> Option<u64> {
 
 #[query]
 fn icrc7_owner_of(ids: Vec<Nat>) -> Vec<Option<Account>> {
-    STATE.with_borrow(|s| {
+    TOKENS.with(|m| {
+        let m = m.borrow();
         ids.iter()
-            .map(|id| nat_to_u64(id).and_then(|id| s.tokens.get(&id)).map(|t| account(t.owner)))
+            .map(|id| nat_to_u64(id).and_then(|id| m.get(&id)).map(|t| account(t.owner)))
             .collect()
     })
 }
 
+/// Token ids of `acc`, ascending, after `prev`, at most `take` (default 100, max 1000).
 #[query]
 fn icrc7_tokens_of(acc: Account, prev: Option<Nat>, take: Option<Nat>) -> Vec<Nat> {
+    if acc.subaccount.is_some() {
+        return vec![];
+    }
     let start = prev.as_ref().and_then(nat_to_u64).map(|p| p + 1).unwrap_or(0);
     let take = take.as_ref().and_then(nat_to_u64).unwrap_or(100).min(1000) as usize;
-    STATE.with_borrow(|s| {
-        s.tokens
-            .range(start..)
-            .filter(|(_, t)| acc.subaccount.is_none() && t.owner == acc.owner)
+    let prefix = format!("{}#", acc.owner.to_text());
+    OWNER_TOKENS.with(|m| {
+        m.borrow()
+            .range(owner_key(&acc.owner, start)..)
+            .map(|e| e.key().clone())
+            .take_while(|k| k.starts_with(&prefix))
             .take(take)
-            .map(|(id, _)| Nat::from(*id))
+            .filter_map(|k| k[prefix.len()..].parse::<u64>().ok().map(Nat::from))
             .collect()
     })
 }
 
 #[query]
 fn icrc7_token_metadata(ids: Vec<Nat>) -> Vec<Option<Vec<(String, Value)>>> {
-    STATE.with_borrow(|s| {
-        ids.iter()
-            .map(|id| {
-                let t = s.tokens.get(&nat_to_u64(id)?)?;
-                let mut fields = vec![
-                    ("marki:metadata".to_string(), Value::Text(t.metadata.clone())),
-                    ("marki:minted_at_ns".to_string(), Value::Nat(Nat::from(t.minted_at_ns))),
-                ];
-                if let Some(img) = t.image_id.and_then(|i| s.images.get(&i)) {
-                    fields.push(("marki:image_bytes".to_string(), Value::Nat(Nat::from(img.len()))));
-                }
-                Some(fields)
-            })
-            .collect()
-    })
+    ids.iter()
+        .map(|id| {
+            let t = TOKENS.with(|m| m.borrow().get(&nat_to_u64(id)?))?;
+            let mut fields = vec![
+                ("marki:metadata".to_string(), Value::Text(t.metadata.clone())),
+                ("marki:minted_at_ns".to_string(), Value::Nat(Nat::from(t.minted_at_ns))),
+            ];
+            if let Some(img) = t.image_id.and_then(|i| IMAGES.with(|m| m.borrow().get(&i))) {
+                fields.push(("marki:image_bytes".to_string(), Value::Nat(Nat::from(img.0.len()))));
+            }
+            Some(fields)
+        })
+        .collect()
 }
 
 #[query]
 fn get_token(id: u64) -> Option<Token> {
-    STATE.with_borrow(|s| s.tokens.get(&id).cloned())
+    TOKENS.with(|m| m.borrow().get(&id))
 }
 
 #[query]
 fn get_image(token_id: u64) -> Option<serde_bytes::ByteBuf> {
-    STATE.with_borrow(|s| {
-        let image_id = s.tokens.get(&token_id)?.image_id?;
-        s.images.get(&image_id).map(|b| serde_bytes::ByteBuf::from(b.clone()))
-    })
+    let image_id = TOKENS.with(|m| m.borrow().get(&token_id))?.image_id?;
+    IMAGES.with(|m| m.borrow().get(&image_id)).map(|img| serde_bytes::ByteBuf::from(img.0))
 }
 
 /// Cycle balance and storage. Read before and after a mint to see its real cost.
 #[query]
 fn nft_stats() -> NftStats {
-    STATE.with_borrow(|s| NftStats {
+    let s = settings();
+    NftStats {
         cycles: Nat::from(ic_cdk::api::canister_cycle_balance()),
-        tokens: s.tokens.len() as u64,
-        images: s.images.len() as u64,
-        image_bytes: s.images.values().map(|b| b.len() as u64).sum(),
-        heap_bytes: (core::arch::wasm32::memory_size(0) * 65_536) as u64,
-    })
+        tokens: TOKENS.with(|m| m.borrow().len()),
+        images: IMAGES.with(|m| m.borrow().len()),
+        image_bytes: s.image_bytes,
+        heap_bytes: heap_bytes(),
+    }
 }
 
-#[ic_cdk::init]
-fn init() {
-    STATE.with_borrow_mut(|s| s.plans = default_plans());
-}
-
-#[ic_cdk::post_upgrade]
-fn post_upgrade() {
-    init();
+fn heap_bytes() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    return (core::arch::wasm32::memory_size(0) * 65_536) as u64;
+    #[cfg(not(target_arch = "wasm32"))]
+    0
 }
 
 #[query]
 fn pricing() -> Pricing {
-    let rate = STATE.with_borrow(|s| s.rate);
+    let rate = RATE.with(|r| *r.borrow());
+    let s = settings();
     Pricing {
         mint_call_cycles: MINT_CALL_CYCLES,
         mint_cycles_per_byte: MINT_CYCLES_PER_BYTE,
@@ -941,9 +1133,62 @@ fn pricing() -> Pricing {
         xdr_usd: XDR_USD,
         xdr_permyriad_per_icp: rate.xdr_permyriad_per_icp,
         rate_timestamp_seconds: rate.timestamp_seconds,
-        ledger: ledger_id(),
-        ledger_fee_e8s: LEDGER_FEE_E8S,
+        ledger: s.ledger,
+        ledger_fee_e8s: s.ledger_fee_e8s,
     }
 }
 
+// ── Lifecycle ───────────────────────────────────────────────────────────────
+
+#[ic_cdk::init]
+fn init(arg: Option<InitArg>) {
+    let arg = arg.unwrap_or_default();
+    if let Some(ledger) = arg.ledger {
+        update_settings(|s| s.ledger = ledger);
+    }
+    PLANS.with(|p| {
+        p.borrow_mut().set(PlanList(default_plans()));
+    });
+}
+
+/// Stable structures restore themselves; plans and settings are kept as they were.
+#[ic_cdk::post_upgrade]
+fn post_upgrade() {}
+
 ic_cdk::export_candid!();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip<T: Storable>(v: T) -> T {
+        T::from_bytes(Cow::Owned(v.into_bytes()))
+    }
+
+    #[test]
+    fn stored_records_roundtrip() {
+        let p = Principal::from_text("2vxsx-fae").unwrap();
+        let purchase = roundtrip(PlanPurchase {
+            id: 7,
+            buyer: p,
+            plan_id: "start".into(),
+            price_e8s: 123,
+            block: Nat::from(u128::MAX),
+            timestamp_ns: 9,
+        });
+        assert_eq!(purchase.buyer, p);
+        assert_eq!(purchase.block, Nat::from(u128::MAX));
+        let img = roundtrip(Image(vec![1, 2, 3, 255]));
+        assert_eq!(img.0, vec![1, 2, 3, 255]);
+        let s = roundtrip(Settings::default());
+        assert_eq!(s.ledger, Principal::from_text(ICP_LEDGER).unwrap());
+        assert_eq!(roundtrip(PlanList(default_plans())).0.len(), 3);
+    }
+
+    #[test]
+    fn owner_keys_sort_by_token_id() {
+        let p = Principal::from_text("2vxsx-fae").unwrap();
+        assert!(owner_key(&p, 9) < owner_key(&p, 10));
+        assert!(owner_key(&p, 10).starts_with(&format!("{}#", p.to_text())));
+    }
+}

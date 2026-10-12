@@ -74,10 +74,10 @@ Measured: a 35.2 KB photo costs ~94M cycles (~$0.00013) across the three calls.
 ```bash
 # 1. ICP network + canister
 cd icp-local && icp network start -d && icp deploy
-# 2. Rust API (api/), port 8090
-cd ../api && cargo run
+# 2. Rust API (idenity/api), port 8090
+cd ../../idenity/api && cargo run
 # 3. Frontend with .env.icplocal (local ICP + local API)
-cd ../web && npm run dev:icp
+cd ../../MarkICP && npm run dev:icp
 ```
 
 Then in the app:
@@ -89,8 +89,29 @@ Then in the app:
 
 Plug does not work well with a local network; use the dev wallet locally.
 
+## Mainnet
+
+The `ic` environment in `icp.yaml` installs the canister on mainnet with the TESTICP ledger
+(`xafvr-biaaa-aaaai-aql5q-cai`, free tokens at https://faucet.internetcomputer.org):
+
+```bash
+icp identity new marki-prod                 # write the seed phrase down on paper
+icp identity default marki-prod
+icp identity account-id                     # send ICP here from an exchange
+icp cycles mint --icp 2 -n ic               # ICP -> cycles
+icp deploy -e ic                            # create + install (TESTICP)
+```
+
+After testing, switch to real ICP:
+`icp canister call payments set_ledger '(principal "ryjl3-tyaaa-aaaaa-aaaba-cai")' -e ic`.
+Withdraw collected ICP: `icp canister call payments withdraw '(record { owner = principal "<you>"; subaccount = null }, <e8s> : nat64)' -e ic`.
+
 ## Notes
 
-- State is heap-only: an upgrade wipes listings, receipts and subscriptions (plans reset to defaults). Test use only.
+- State lives in stable memory (`ic-stable-structures`): plans, subscriptions, purchases, listings,
+  receipts, tokens and images survive upgrades. Only in-progress uploads and the cached ICP/XDR rate are
+  heap-only.
+- The ledger is chosen at install time (`InitArg.ledger`, default ICP); `set_ledger` switches it later
+  and reloads the fee. Controller-only: `withdraw(to, amount_e8s)`, `set_ledger`, `set_plans`, `consume_mints`.
 - For mainnet tests without real money, switch `ICP_LEDGER` in `src/lib.rs` to the TESTICP ledger `xafvr-biaaa-aaaai-aql5q-cai` and get tokens from https://faucet.internetcomputer.org.
 - Candid UI: printed by `icp deploy`.

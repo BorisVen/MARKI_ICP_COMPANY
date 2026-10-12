@@ -7,7 +7,7 @@ use axum::{
 use std::sync::Arc;
 
 use crate::{
-    handlers::{admin, ai, auth, cod_orders, deliveries, marketplace, nfc, notifications, nfts, posts, profile, public, users, wallets},
+    handlers::{admin, ai, auth, cod_orders, deliveries, gifts, marketplace, nfc, notifications, nfts, posts, profile, public, users, wallets},
     middleware::auth::auth_middleware,
     AppState,
 };
@@ -76,6 +76,11 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/posts/:id/save", post(users::toggle_saved_post))
         .route("/posts/:id/repost", post(users::toggle_reposted_post))
         .route("/posts/:id/comments", post(posts::add_comment))
+        // Gifts
+        .route("/gifts", get(gifts::my_gifts))
+        .route("/gifts", post(gifts::create_gift))
+        .route("/gifts/:code", delete(gifts::cancel_gift))
+        .route("/gifts/:code/claim", post(gifts::claim_gift))
         // Marketplace
         .route("/marketplace/buy", post(marketplace::buy_nft))
         .route("/marketplace/cod", post(marketplace::buy_nft_cod))
@@ -121,6 +126,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/public/users/:username/view", post(public::view_profile))
         .route("/public/nfts/:owner_id/:nft_id", get(public::get_passport))
         .route("/public/nfts/:owner_id/:nft_id/view", post(public::view_passport))
+        .route("/public/gifts/:code", get(gifts::preview_gift))
         .route("/ai/generate",   post(ai::generate_image));
 
     Router::new().merge(protected).merge(public)

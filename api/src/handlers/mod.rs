@@ -3,6 +3,7 @@ pub mod ai;
 pub mod auth;
 pub mod cod_orders;
 pub mod deliveries;
+pub mod gifts;
 pub mod marketplace;
 pub mod nfc;
 pub mod notifications;
