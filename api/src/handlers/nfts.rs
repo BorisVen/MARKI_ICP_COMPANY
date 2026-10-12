@@ -334,6 +334,7 @@ pub async fn create_nft(
         qr_image_url: None,
         gift_from: None,
         gift_id: None,
+        owners: Vec::new(),
     };
 
     let mut nfts = load_nfts(&state, &auth.uid).await?;
@@ -512,6 +513,7 @@ pub async fn batch_create_nfts(
                     qr_image_url: None,
                     gift_from: None,
                     gift_id: None,
+                    owners: Vec::new(),
                 };
                 nfts.push(nft);
                 results.push(BatchItemResult {
@@ -784,6 +786,7 @@ pub async fn create_edition_nfts(
         qr_image_url: None,
         gift_from: None,
         gift_id: None,
+        owners: Vec::new(),
     };
 
     // ── Print-edition placeholder records (edition_number = 1..N) ─────────────
@@ -1133,7 +1136,9 @@ pub async fn transfer_nft(
 
     // Build the new record with updated ownership.
     let new_id = Uuid::new_v4().to_string();
+    let owners = seller_nft.owners_with(buyer_uid, &buyer_name, buyer_doc.as_ref().and_then(|d| d.get("username")).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_owned), "sale", &Utc::now().to_rfc3339());
     let transferred = Nft {
+        owners,
         id:         new_id.clone(),
         owner_id:   buyer_uid.clone(),
         owner_name: buyer_name,

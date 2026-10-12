@@ -320,7 +320,10 @@ pub async fn claim_gift(
     let me = user_doc(&state, &auth.uid).await?;
     let my_name = text(&me, "name");
     let new_id = Uuid::new_v4().to_string();
+    let username = text(&me, "username");
+    let owners = source.owners_with(&auth.uid, &my_name, (!username.is_empty()).then_some(username), "gift", &Utc::now().to_rfc3339());
     let received = crate::models::Nft {
+        owners,
         id: new_id.clone(),
         owner_id: auth.uid.clone(),
         owner_name: my_name.clone(),

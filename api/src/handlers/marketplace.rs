@@ -116,7 +116,9 @@ pub async fn buy_nft(
         .map(str::to_owned);
 
     let new_nft_id = uuid::Uuid::new_v4().to_string();
+    let owners = seller_nft.owners_with(&auth.uid, &buyer_name, buyer_doc.as_ref().and_then(|d| d.get("username")).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_owned), "sale", &chrono::Utc::now().to_rfc3339());
     let buyer_nft = Nft {
+        owners,
         id: new_nft_id.clone(),
         owner_id: auth.uid.clone(),
         owner_name: buyer_name.clone(),

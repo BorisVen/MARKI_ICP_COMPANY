@@ -224,7 +224,7 @@ async fn verified_nft(
         .ok_or_else(|| AppError::NotFound("This QR is not registered by Idenity".into()))?;
     let issuer = state
         .firestore
-        .get("users", owner_id)
+        .get("users", nft.issuer_id())
         .await
         .map_err(|e| AppError::Firebase(e.to_string()))?
         .ok_or_else(|| AppError::NotFound("Issuer profile not found".into()))?;

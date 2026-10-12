@@ -54,6 +54,51 @@ pub struct Nft {
     pub gift_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gift_id: Option<String>,
+    /// Ownership chain, oldest first: issuer, then every gift or sale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owners: Vec<OwnershipRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnershipRecord {
+    pub uid: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    pub at: String,
+    /// "issued", "gift" or "sale".
+    pub via: String,
+}
+
+impl Nft {
+    /// The ownership chain extended by a new owner. NFTs created before the chain
+    /// existed start it with their current owner as the issuer.
+    pub fn owners_with(&self, uid: &str, name: &str, username: Option<String>, via: &str, at: &str) -> Vec<OwnershipRecord> {
+        let mut owners = self.owners.clone();
+        if owners.is_empty() {
+            owners.push(OwnershipRecord {
+                uid: self.owner_id.clone(),
+                name: self.owner_name.clone(),
+                username: None,
+                at: self.created_at.clone(),
+                via: "issued".into(),
+            });
+        }
+        owners.push(OwnershipRecord {
+            uid: uid.to_owned(),
+            name: name.to_owned(),
+            username,
+            at: at.to_owned(),
+            via: via.to_owned(),
+        });
+        owners
+    }
+
+    /// Who issued the NFT: the first owner in the chain, else the current owner.
+    pub fn issuer_id(&self) -> &str {
+        self.owners.first().map(|o| o.uid.as_str()).unwrap_or(&self.owner_id)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,4 +234,30 @@ pub struct BatchItemResult {
     /// Off-chain Metaplex metadata JSON URL — present on success, absent on error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata_uri: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nft(owner: &str) -> Nft {
+        serde_json::from_value(serde_json::json!({
+            "id": "n1", "title": "Water", "description": "", "image": "",
+            "category": null, "blockchain": "icp", "royalty": 0.0,
+            "ownerId": owner, "ownerName": "Water", "price": null, "currency": null,
+            "createdAt": "2026-10-12T12:18:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn chain_starts_with_issuer_and_grows() {
+        let a = nft("water");
+        assert_eq!(a.issuer_id(), "water");
+        let b = Nft { owners: a.owners_with("alan", "Алан", None, "gift", "t1"), owner_id: "alan".into(), ..a };
+        assert_eq!(b.owners.iter().map(|o| o.via.as_str()).collect::<Vec<_>>(), ["issued", "gift"]);
+        assert_eq!(b.issuer_id(), "water");
+        let c = b.owners_with("bob", "Bob", Some("bob".into()), "sale", "t2");
+        assert_eq!(c.iter().map(|o| o.uid.as_str()).collect::<Vec<_>>(), ["water", "alan", "bob"]);
+    }
 }
