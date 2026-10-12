@@ -109,6 +109,8 @@ export type NFT = {
   price?: number;
   currency?: string;
   userId?: string;
+  /** Wallet owner's uid (set by the API). */
+  ownerId?: string;
   tokenId?: string;
   metadataUri?: string;
   nfcUid?: string;

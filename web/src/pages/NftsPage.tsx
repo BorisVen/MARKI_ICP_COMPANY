@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
+import { useAuth } from '../auth';
 import {
   apiAiGenerateImage,
   apiBatchCreateNFTs,
@@ -1314,6 +1315,7 @@ function BatchNftForm({ onDone }: { onDone: () => Promise<void> }) {
 // ────────────────────────────────────────────────────────────────────────────
 
 function QrModal({ nft, onClose }: { nft: NFT; onClose: () => void }) {
+  const { user } = useAuth();
   const [src, setSrc] = useState<string>('');
   const [copied, setCopied] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -1321,8 +1323,11 @@ function QrModal({ nft, onClose }: { nft: NFT; onClose: () => void }) {
   const url = useMemo(() => {
     const base = (import.meta.env.VITE_QR_BASE_URL as string) || 'https://borisven.github.io/MARKI_ICP/';
     if (nft.nfcUid) return `${base}?nfc=${encodeURIComponent(nft.nfcUid)}`;
-    return `${base}?nft=${encodeURIComponent(nft.id)}`;
-  }, [nft.id, nft.nfcUid]);
+    // The owner lets anyone (guest or signed in) open the passport; without it
+    // the viewer can only look the NFT up in their own wallet.
+    const owner = nft.ownerId || nft.userId || user?.uid;
+    return `${base}?nft=${encodeURIComponent(nft.id)}${owner ? `&owner=${encodeURIComponent(owner)}` : ''}`;
+  }, [nft.id, nft.nfcUid, nft.ownerId, nft.userId, user?.uid]);
 
   // Drawn here from `url`, not taken from the server: one API serves several sites,
   // so a server-made PNG could point at another site than the link shown below it.
