@@ -91,6 +91,11 @@ Plug does not work well with a local network; use the dev wallet locally.
 
 ## Mainnet
 
+Live canister: **`dbrm3-yqaaa-aaaak-qzjeq-cai`** (controller `marki-prod`), deployed 2026-10-12
+on the TESTICP ledger. Frontends use `VITE_ICP_HOST=https://icp0.io`,
+`VITE_ICP_PAYMENTS_CANISTER_ID=dbrm3-yqaaa-aaaak-qzjeq-cai` and
+`VITE_ICP_LEDGER_CANISTER_ID` matching the canister's ledger.
+
 The `ic` environment in `icp.yaml` installs the canister on mainnet with the TESTICP ledger
 (`xafvr-biaaa-aaaai-aql5q-cai`, free tokens at https://faucet.internetcomputer.org):
 
