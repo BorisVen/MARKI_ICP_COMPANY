@@ -8,7 +8,6 @@ import {
   apiCreatePost,
   apiDeleteNFT,
   apiGenerateMissingQr,
-  apiGenerateNFTQr,
   apiRegenerateAllQr,
   apiGetMintInfo,
   apiGetNFTs,
@@ -1325,38 +1324,24 @@ function QrModal({ nft, onClose }: { nft: NFT; onClose: () => void }) {
     return `${base}?nft=${encodeURIComponent(nft.id)}`;
   }, [nft.id, nft.nfcUid]);
 
+  // Drawn here from `url`, not taken from the server: one API serves several sites,
+  // so a server-made PNG could point at another site than the link shown below it.
   useEffect(() => {
     let cancelled = false;
-    if (nft.qrImageUrl) {
-      setSrc(nft.qrImageUrl);
-      return;
-    }
     setGenerating(true);
-    apiGenerateNFTQr(nft.id)
-      .then((updated: any) => {
-        if (!cancelled) {
-          setSrc(updated.qrImageUrl || '');
-          setGenerating(false);
-        }
-      })
-      .catch(() => {
-        // Fallback: generate client-side if server generation fails
-        if (!cancelled) {
-          QRCode.toDataURL(url, {
-            width: 320,
-            margin: 3,
-            color: { dark: '#0b0f14', light: '#ffffff' },
-            errorCorrectionLevel: 'H',
-          }).then(dataUrl => {
-            if (!cancelled) {
-              setSrc(dataUrl);
-              setGenerating(false);
-            }
-          });
-        }
-      });
+    QRCode.toDataURL(url, {
+      width: 320,
+      margin: 3,
+      color: { dark: '#0b0f14', light: '#ffffff' },
+      errorCorrectionLevel: 'H',
+    }).then(dataUrl => {
+      if (!cancelled) {
+        setSrc(dataUrl);
+        setGenerating(false);
+      }
+    });
     return () => { cancelled = true; };
-  }, [url, nft.qrImageUrl, nft.id]);
+  }, [url]);
 
   const copy = async () => {
     try {
