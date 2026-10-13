@@ -7,7 +7,7 @@ use axum::{
 use std::sync::Arc;
 
 use crate::{
-    handlers::{admin, ai, auth, cod_orders, deliveries, gifts, marketplace, nfc, notifications, nfts, posts, profile, public, users, wallets},
+    handlers::{admin, ai, auth, cod_orders, deliveries, gifts, goods, marketplace, nfc, notifications, nfts, posts, profile, public, users, wallets},
     middleware::auth::auth_middleware,
     AppState,
 };
@@ -81,6 +81,14 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/gifts", post(gifts::create_gift))
         .route("/gifts/:code", delete(gifts::cancel_gift))
         .route("/gifts/:code/claim", post(gifts::claim_gift))
+        // Goods authenticity (products → batches → units)
+        .route("/goods/products", get(goods::my_products).post(goods::create_product))
+        .route("/goods/products/:id/batches", post(goods::create_batch))
+        .route("/goods/batches/:id", get(goods::get_batch))
+        .route("/goods/batches/:id/events", post(goods::add_event))
+        .route("/goods/verify/:code", get(goods::verify))
+        .route("/goods/verify/:code/claim", post(goods::claim))
+        .route("/goods/mine", get(goods::my_goods))
         // Marketplace
         .route("/marketplace/buy", post(marketplace::buy_nft))
         .route("/marketplace/cod", post(marketplace::buy_nft_cod))
@@ -127,6 +135,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/public/nfts/:owner_id/:nft_id", get(public::get_passport))
         .route("/public/nfts/:owner_id/:nft_id/view", post(public::view_passport))
         .route("/public/gifts/:code", get(gifts::preview_gift))
+        .route("/public/goods/:code", get(goods::public_verify))
         .route("/ai/generate",   post(ai::generate_image));
 
     Router::new().merge(protected).merge(public)

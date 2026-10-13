@@ -8,6 +8,7 @@ import CrmPage from './pages/CrmPage';
 import NftsPage from './pages/NftsPage';
 import PricingPage from './pages/PricingPage';
 import GiftsPage from './gifts/GiftsPage';
+import GoodsPage from './goods/GoodsPage';
 import MarketplacePage from './pages/MarketplacePage';
 import FeedPage from './pages/FeedPage';
 import WalletsPage from './pages/WalletsPage';
@@ -21,6 +22,7 @@ const PAGE_TITLES: Record<PageId, string> = {
   nfts:          'NFT',
   pricing:       'Тарифи',
   gifts:         'Подарунки',
+  goods:         'Товари',
   marketplace:   'Маркетплейс',
   feed:          'Стрічка',
   wallets:       'Гаманці',
@@ -88,6 +90,7 @@ export default function App() {
       {page === 'crm'           && <CrmPage />}
       {page === 'nfts'          && <NftsPage />}
       {page === 'pricing'       && <PricingPage />}
+      {page === 'goods'         && <GoodsPage />}
       {page === 'gifts'         && <GiftsPage hint="Подарункові колекції для клієнтів: посилання, QR і хто що забрав." />}
       {page === 'marketplace'   && <MarketplacePage />}
       {page === 'feed'          && <FeedPage />}

@@ -9,6 +9,7 @@ export type PageId =
   | 'nfts'
   | 'pricing'
   | 'gifts'
+  | 'goods'
   | 'marketplace'
   | 'feed'
   | 'wallets'
@@ -29,6 +30,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { id: 'dashboard',   label: 'Панель',      icon: <Icon.Dashboard />, mobile: true },
       { id: 'crm',         label: 'Замовлення',  icon: <Icon.Truck />,     mobile: true },
+      { id: 'goods',       label: 'Товари',      icon: <Icon.Box /> },
       { id: 'gifts',       label: 'Подарунки',   icon: <Icon.Gift /> },
       { id: 'nfts',        label: 'NFT',         icon: <Icon.Box />,       mobile: true },
       { id: 'marketplace', label: 'Маркетплейс', icon: <Icon.Store />,     mobile: true },

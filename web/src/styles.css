@@ -1821,3 +1821,14 @@ details.soft[open] summary { margin-bottom: 10px; }
 .viewer-topbar { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; }
 .viewer-topbar > :first-child { justify-self: start; }
 .viewer-topbar > :last-child { justify-self: end; }
+
+/* Goods authenticity */
+.goods-product .gp-head { display: flex; gap: 12px; align-items: center; }
+.goods-product .gp-icon { width: 52px; height: 52px; border-radius: 10px; background: var(--bg-soft); display: flex; align-items: center; justify-content: center; font-size: 26px; flex: none; }
+.gp-batches { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.gp-batch { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; text-align: left; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-soft); color: var(--text); cursor: pointer; font: inherit; font-size: 13px; }
+.gp-batch:hover { border-color: var(--primary); }
+.goods-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
+.goods-stats > div { background: var(--bg-soft); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+.goods-stats strong { font-size: 18px; }
+.goods-stats span { font-size: 11px; color: var(--muted); }

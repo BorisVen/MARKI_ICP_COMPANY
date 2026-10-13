@@ -481,3 +481,95 @@ export const apiMyGifts    = () => get<{ sent: Gift[]; received: Gift[] }>('/api
 export const apiCancelGift = (code: string) => del<Gift>(`/api/gifts/${encodeURIComponent(code)}`);
 export const apiClaimGift  = (code: string) => post<{ gift: Gift; nft: NFT }>(`/api/gifts/${encodeURIComponent(code)}/claim`);
 export const apiGiftPreview = (code: string) => get<GiftPreview>(`/api/public/gifts/${encodeURIComponent(code)}`);
+
+// ── Goods authenticity (products → batches → units) ─────────────────────────
+
+export type GoodsCategory = 'wine' | 'spirits' | 'beer' | 'dairy' | 'food' | 'cosmetics' | 'other';
+export type GoodsStage = 'produced' | 'warehouse' | 'shipped' | 'in_store';
+export type GoodsEventKind = GoodsStage | 'lab' | 'note';
+
+export interface GoodsProduct {
+  id: string;
+  ownerId: string;
+  brandName: string;
+  name: string;
+  category: GoodsCategory;
+  /** 'unit': a QR per item (wine); 'batch': one QR per lot (milk). */
+  mode: 'unit' | 'batch';
+  description: string;
+  image: string;
+  attributes: Record<string, string>;
+  createdAt: string;
+}
+
+export interface GoodsBatchSummary {
+  id: string;
+  lot: string;
+  producedAt: string;
+  expiresAt: string;
+  size: number;
+  claimed: number;
+  stage: GoodsStage;
+  createdAt: string;
+}
+
+export interface GoodsEvent {
+  kind: GoodsEventKind;
+  location: string;
+  note: string;
+  actorName: string;
+  at: string;
+}
+
+export interface GoodsUnit {
+  serial: number;
+  code: string;
+  ownerId?: string;
+  ownerName?: string;
+  claimedAt?: string;
+}
+
+export interface GoodsBatch {
+  id: string;
+  productId: string;
+  ownerId: string;
+  mode: 'unit' | 'batch';
+  lot: string;
+  producedAt: string;
+  expiresAt: string;
+  attributes: Record<string, string>;
+  units: GoodsUnit[];
+  events: GoodsEvent[];
+  createdAt: string;
+}
+
+export interface GoodsVerifyView {
+  code: string;
+  mode: 'unit' | 'batch';
+  product: GoodsProduct;
+  brandVerified: boolean;
+  batchId: string;
+  lot: string;
+  producedAt: string;
+  expiresAt: string;
+  attributes: Record<string, string>;
+  batchSize: number;
+  unit?: { serial: number; claimed: boolean; claimedAt?: string; mine: boolean };
+  stage: GoodsStage;
+  events: GoodsEvent[];
+  warnings: string[];
+  scans: number;
+}
+
+export const apiGoodsProducts = () => get<(GoodsProduct & { batches: GoodsBatchSummary[] })[]>('/api/goods/products');
+export const apiCreateGoodsProduct = (body: {
+  name: string; category: GoodsCategory; mode: 'unit' | 'batch'; description?: string;
+  imageData?: string; attributes?: Record<string, string>;
+}) => post<GoodsProduct>('/api/goods/products', body);
+export const apiCreateGoodsBatch = (productId: string, body: {
+  lot: string; producedAt?: string; expiresAt?: string; units?: number;
+  attributes?: Record<string, string>; location?: string;
+}) => post<GoodsBatch>(`/api/goods/products/${encodeURIComponent(productId)}/batches`, body);
+export const apiGoodsBatch = (id: string) => get<GoodsBatch>(`/api/goods/batches/${encodeURIComponent(id)}`);
+export const apiAddGoodsEvent = (id: string, body: { kind: GoodsEventKind; location?: string; note?: string }) =>
+  post<GoodsBatch>(`/api/goods/batches/${encodeURIComponent(id)}/events`, body);
