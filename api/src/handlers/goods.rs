@@ -264,9 +264,15 @@ pub struct ViewQuery {
     /// The viewer's IANA time zone (e.g. `Europe/Kyiv`), for the scan region.
     #[serde(default)]
     pub tz: Option<String>,
-    /// Re-check without counting a scan (the page polls while open).
+    /// Re-check without counting a scan (the page polls while open): `1` or `true`.
     #[serde(default)]
-    pub peek: Option<bool>,
+    pub peek: Option<String>,
+}
+
+impl ViewQuery {
+    fn peek(&self) -> bool {
+        matches!(self.peek.as_deref(), Some("1" | "true"))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -914,7 +920,7 @@ pub async fn public_verify(
     Query(q): Query<ViewQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Json<VerifyView>> {
-    let scan = (!q.peek.unwrap_or(false)).then(|| ScanInput::from_request(&headers, q.tz.as_deref()));
+    let scan = (!q.peek()).then(|| ScanInput::from_request(&headers, q.tz.as_deref()));
     Ok(Json(build_view(&state, &code, None, scan).await?))
 }
 
@@ -926,7 +932,7 @@ pub async fn verify(
     Query(q): Query<ViewQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Json<VerifyView>> {
-    let scan = (!q.peek.unwrap_or(false)).then(|| ScanInput::from_request(&headers, q.tz.as_deref()));
+    let scan = (!q.peek()).then(|| ScanInput::from_request(&headers, q.tz.as_deref()));
     Ok(Json(build_view(&state, &code, Some(&auth.uid), scan).await?))
 }
 
@@ -1210,5 +1216,12 @@ mod tests {
         assert_eq!(region_of("Europe/Kiev"), region_of("Europe/Kyiv"));
         assert_eq!(region_of("America/New_York"), "America/New_York");
         assert_eq!(region_of(""), "?");
+    }
+
+    #[test]
+    fn peek_accepts_the_forms_browsers_send() {
+        let q = |p: Option<&str>| ViewQuery { tz: None, peek: p.map(Into::into) };
+        assert!(q(Some("1")).peek() && q(Some("true")).peek());
+        assert!(!q(None).peek() && !q(Some("0")).peek());
     }
 }
