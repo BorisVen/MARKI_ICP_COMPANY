@@ -608,6 +608,30 @@ pub fn region_of(tz: &str) -> String {
     if zone.is_empty() { "?".into() } else { zone }
 }
 
+/// Products and brand profiles barely change but are read on every scan:
+/// keep them for a few minutes instead of a Firestore round trip each time.
+static DOC_CACHE: LazyLock<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Value)>>> =
+    LazyLock::new(Default::default);
+const DOC_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+async fn cached(state: &AppState, collection: &str, id: &str) -> ApiResult<Option<Value>> {
+    let key = format!("{collection}/{id}");
+    if let Some((at, v)) = DOC_CACHE.lock().unwrap().get(&key) {
+        if at.elapsed() < DOC_CACHE_TTL {
+            return Ok(Some(v.clone()));
+        }
+    }
+    let doc = state.firestore.get(collection, id).await.map_err(fs_err)?;
+    if let Some(v) = &doc {
+        let mut cache = DOC_CACHE.lock().unwrap();
+        if cache.len() > 2_000 {
+            cache.clear();
+        }
+        cache.insert(key, (std::time::Instant::now(), v.clone()));
+    }
+    Ok(doc)
+}
+
 fn parse_time(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
 }
@@ -721,7 +745,7 @@ fn flag_text(f: &CloneFlag) -> String {
 
 /// Logs a scan of `code` and returns its total count and recent scans.
 /// Failures never block a check.
-async fn record_scan(state: &AppState, batch_id: &str, code: &str, scan: Option<Scan>) -> (u64, Vec<Scan>) {
+async fn record_scan(state: &Arc<AppState>, batch_id: &str, code: &str, scan: Option<Scan>) -> (u64, Vec<Scan>) {
     let doc = state.firestore.get(SCANS, batch_id).await.ok().flatten().unwrap_or_else(|| json!({}));
     let count_field = format!("c_{code}");
     let list_field = format!("s_{code}");
@@ -755,7 +779,13 @@ async fn record_scan(state: &AppState, batch_id: &str, code: &str, scan: Option<
         fields.insert(count_field, json!(count));
         fields.insert(list_field, json!(scans));
         fields.insert("total".into(), json!(total));
-        let _ = state.firestore.update(SCANS, batch_id, &Value::Object(fields)).await;
+        // The buyer shouldn't wait for this write: it only feeds the next check.
+        let (state, batch_id) = (state.clone(), batch_id.to_owned());
+        tokio::spawn(async move {
+            if let Err(e) = state.firestore.update(SCANS, &batch_id, &Value::Object(fields)).await {
+                tracing::warn!(error = %e, "Failed to record a goods scan");
+            }
+        });
     }
     (count, scans)
 }
@@ -792,10 +822,21 @@ async fn flag_unit(state: &AppState, batch_id: &str, code: &str, flag: CloneFlag
     Ok(())
 }
 
-async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, scan: Option<ScanInput>) -> ApiResult<VerifyView> {
+async fn build_view(state: &Arc<AppState>, code: &str, viewer: Option<&str>, scan: Option<ScanInput>) -> ApiResult<VerifyView> {
     let (batch_id, unit_code) = split_code(code)?;
     let batch: Batch = load(state, BATCHES, &batch_id, "Code").await?;
-    let product: Product = load(state, PRODUCTS, &batch.product_id, "Product").await?;
+    let now = Utc::now();
+    let code_lc = code.to_ascii_lowercase();
+    let scan = scan.map(|s| Scan { at: now.to_rfc3339(), region: s.region, device: s.device, uid: viewer.map(str::to_owned), geo: s.geo });
+    // The rest needs only the batch: fetch it side by side (each read is a round trip).
+    let (product, brand, (_, recent)) = tokio::join!(
+        cached(state, PRODUCTS, &batch.product_id),
+        cached(state, "users", &batch.owner_id),
+        record_scan(state, &batch.id, &code_lc, scan),
+    );
+    let product: Product = serde_json::from_value(product?.ok_or_else(|| AppError::NotFound("Product not found".into()))?)
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let brand = brand?.unwrap_or_else(|| json!({}));
     let mut unit = match &unit_code {
         Some(c) => Some(
             batch
@@ -809,13 +850,7 @@ async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, scan: Op
         None => None,
     };
 
-    let brand = user_doc(state, &batch.owner_id).await?;
     let brand_verified = brand.get("companyApproved").and_then(Value::as_bool).unwrap_or(false);
-
-    let now = Utc::now();
-    let code_lc = code.to_ascii_lowercase();
-    let scan = scan.map(|s| Scan { at: now.to_rfc3339(), region: s.region, device: s.device, uid: viewer.map(str::to_owned), geo: s.geo });
-    let (_, recent) = record_scan(state, &batch.id, &code_lc, scan).await;
 
     // Clone check: only unit codes; batch codes are on many packs by design.
     if let Some(u) = unit.as_mut() {
