@@ -578,6 +578,8 @@ export interface GoodsVerifyView {
   /** Seen in two countries at once: very likely a copied label. */
   suspicious: boolean;
   suspiciousRegions?: string[];
+  /** Why the unit is flagged (short summary in the app). */
+  flag?: GoodsUnit['flag'];
   /** 'qr' today; 'nfc' for signed chips later. */
   protection: 'qr' | 'nfc';
   scans: number;

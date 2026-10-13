@@ -425,6 +425,9 @@ pub struct VerifyView {
     pub suspicious: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub suspicious_regions: Vec<String>,
+    /// Why the unit is flagged, for a short summary in the app.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flag: Option<CloneFlag>,
     /// How the item is protected: "qr" today, "nfc" for signed chips later.
     pub protection: String,
     pub scans: u64,
@@ -871,6 +874,7 @@ async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, scan: Op
         events: batch.events.clone(),
         suspicious,
         suspicious_regions,
+        flag,
         protection: "qr".into(),
         warnings,
         scans,
