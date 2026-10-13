@@ -430,7 +430,6 @@ pub struct VerifyView {
     pub flag: Option<CloneFlag>,
     /// How the item is protected: "qr" today, "nfc" for signed chips later.
     pub protection: String,
-    pub scans: u64,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -816,7 +815,7 @@ async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, scan: Op
     let now = Utc::now();
     let code_lc = code.to_ascii_lowercase();
     let scan = scan.map(|s| Scan { at: now.to_rfc3339(), region: s.region, device: s.device, uid: viewer.map(str::to_owned), geo: s.geo });
-    let (scans, recent) = record_scan(state, &batch.id, &code_lc, scan).await;
+    let (_, recent) = record_scan(state, &batch.id, &code_lc, scan).await;
 
     // Clone check: only unit codes; batch codes are on many packs by design.
     if let Some(u) = unit.as_mut() {
@@ -877,7 +876,6 @@ async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, scan: Op
         flag,
         protection: "qr".into(),
         warnings,
-        scans,
         product,
     })
 }
@@ -1051,12 +1049,27 @@ pub async fn get_batch(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthenticatedUser>,
     Path(batch_id): Path<String>,
-) -> ApiResult<Json<Batch>> {
+) -> ApiResult<Json<BatchWithScans>> {
     let batch: Batch = load(&state, BATCHES, &batch_id, "Batch").await?;
     if batch.owner_id != auth.uid {
         return Err(AppError::Forbidden("Not your batch".into()));
     }
-    Ok(Json(batch))
+    // Scan counts are for the brand only; buyers never see them.
+    let doc = state.firestore.get(SCANS, &batch.id).await.ok().flatten().unwrap_or_else(|| json!({}));
+    let count = |field: String| doc.get(&field).and_then(Value::as_u64).unwrap_or(0);
+    let unit_scans = batch.units.iter().map(|u| (u.serial, count(format!("c_{}", u.code)))).collect();
+    let scans_total = count("total".into());
+    Ok(Json(BatchWithScans { batch, scans_total, unit_scans }))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchWithScans {
+    #[serde(flatten)]
+    pub batch: Batch,
+    pub scans_total: u64,
+    /// Scans per unit, by serial.
+    pub unit_scans: BTreeMap<u32, u64>,
 }
 
 /// `POST /api/goods/batches/:id/events` — a supply-chain step for the whole batch.

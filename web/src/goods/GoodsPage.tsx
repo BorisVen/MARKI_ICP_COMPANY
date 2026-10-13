@@ -279,8 +279,13 @@ function BatchModal({ product, batchId, onClose }: { product: GoodsProduct; batc
   const [busy, setBusy] = useState(false);
   const [printing, setPrinting] = useState(false);
 
+  const [scans, setScans] = useState<{ total: number; units: Record<string, number> } | null>(null);
+  const [showUnits, setShowUnits] = useState(false);
+
   useEffect(() => {
-    apiGoodsBatch(batchId).then(setBatch).catch(e => setError(e?.message ?? 'Не вдалося завантажити партію'));
+    apiGoodsBatch(batchId)
+      .then(b => { setBatch(b); setScans({ total: b.scansTotal ?? 0, units: b.unitScans ?? {} }); })
+      .catch(e => setError(e?.message ?? 'Не вдалося завантажити партію'));
   }, [batchId]);
 
   const addEvent = async () => {
@@ -328,7 +333,27 @@ function BatchModal({ product, batchId, onClose }: { product: GoodsProduct; batc
               {product.mode === 'unit' && <div><strong>{claimed}</strong><span>куплено й зареєстровано</span></div>}
               <div><strong>{batch.expiresAt || '—'}</strong><span>придатний до</span></div>
               {product.mode === 'unit' && <div className={flagged.length ? 'danger' : ''}><strong>{flagged.length}</strong><span>підозра на підробку</span></div>}
+              <div><strong>{scans?.total ?? '…'}</strong><span>сканувань (бачите лише ви)</span></div>
             </div>
+
+            {product.mode === 'unit' && (
+              <>
+                <button className="btn btn-block" style={{ marginTop: 10 }} onClick={() => setShowUnits(v => !v)}>
+                  {showUnits ? 'Сховати пляшки' : `Пляшки й сканування (${batch.units.length})`}
+                </button>
+                {showUnits && (
+                  <div className="goods-units">
+                    {batch.units.map(u => (
+                      <div key={u.serial} className={`goods-unit ${u.flag ? 'flag' : ''}`}>
+                        <span>№ {u.serial}</span>
+                        <span className="muted">{u.flag ? '⚠️ підозра' : u.ownerId ? '🧾 продано' : 'у продажу'}</span>
+                        <span>{scans?.units[String(u.serial)] ?? 0} скан.</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
 
             {flagged.length > 0 && (
               <div className="notice notice-warn" style={{ marginTop: 12 }}>

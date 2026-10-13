@@ -582,7 +582,6 @@ export interface GoodsVerifyView {
   flag?: GoodsUnit['flag'];
   /** 'qr' today; 'nfc' for signed chips later. */
   protection: 'qr' | 'nfc';
-  scans: number;
 }
 
 export const apiGoodsProducts = () => get<(GoodsProduct & { batches: GoodsBatchSummary[] })[]>('/api/goods/products');
@@ -594,7 +593,9 @@ export const apiCreateGoodsBatch = (productId: string, body: {
   lot: string; producedAt?: string; expiresAt?: string; units?: number;
   attributes?: Record<string, string>; location?: string;
 }) => post<GoodsBatch>(`/api/goods/products/${encodeURIComponent(productId)}/batches`, body);
-export const apiGoodsBatch = (id: string) => get<GoodsBatch>(`/api/goods/batches/${encodeURIComponent(id)}`);
+/** Brand view of a batch, with scan counts (never shown to buyers). */
+export const apiGoodsBatch = (id: string) =>
+  get<GoodsBatch & { scansTotal: number; unitScans: Record<string, number> }>(`/api/goods/batches/${encodeURIComponent(id)}`);
 export const apiClearGoodsFlag = (batchId: string, serial: number) =>
   del<GoodsBatch>(`/api/goods/batches/${encodeURIComponent(batchId)}/units/${serial}/flag`);
 export const apiAddGoodsEvent = (id: string, body: { kind: GoodsEventKind; location?: string; note?: string }) =>
