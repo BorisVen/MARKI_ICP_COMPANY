@@ -78,6 +78,7 @@ export default function GoodsPage() {
                     <button key={b.id} className="gp-batch" onClick={() => setOpenBatch({ product: p, id: b.id })}>
                       <strong>Партія {b.lot}</strong>
                       <span className="badge badge-info">{STAGE[b.stage]}</span>
+                      {b.flagged > 0 && <span className="badge badge-danger">⚠️ підозра: {b.flagged}</span>}
                       <span className="muted">
                         {p.mode === 'unit' ? `${b.size} шт · куплено ${b.claimed}` : 'QR на партію'}
                         {b.expiresAt && ` · до ${b.expiresAt}`}
@@ -331,10 +332,10 @@ function BatchModal({ product, batchId, onClose }: { product: GoodsProduct; batc
 
             {flagged.length > 0 && (
               <div className="notice notice-warn" style={{ marginTop: 12 }}>
-                <strong>Коди, які сканували в різних країнах за добу:</strong>
+                <strong>Схоже на скопійовані етикетки:</strong>
                 {flagged.map(u => (
                   <div key={u.serial} className="goods-flag">
-                    <span>№ {u.serial} · {u.flag!.regions.join(', ')} · {fmtDateTime(u.flag!.at)}</span>
+                    <span>№ {u.serial} · {flagReason(u.flag!)} · {fmtDateTime(u.flag!.at)}</span>
                     <button className="btn" onClick={() => clearFlag(u.serial)}>Зняти позначку</button>
                   </div>
                 ))}
@@ -382,6 +383,13 @@ function BatchModal({ product, batchId, onClose }: { product: GoodsProduct; batc
       </div>
     </div>
   );
+}
+
+/** Why a unit was flagged, in a few words for the brand. */
+function flagReason(f: NonNullable<GoodsBatch['units'][number]['flag']>): string {
+  if (f.reason === 'distance') return `~${f.distanceKm} км за ${f.hours} год`;
+  if (f.reason === 'devices') return `${f.devices} різних пристроїв до продажу`;
+  return `різні країни: ${f.regions.join(', ')}`;
 }
 
 /** Opens a print-ready sheet of QR labels (A4, 4 per row) in a new window. */

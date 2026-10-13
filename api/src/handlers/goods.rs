@@ -18,6 +18,10 @@
 //! hash. If people other than the owner scan one code from two countries within a
 //! day, the unit is flagged as a probable fake and everyone sees it. The owner and
 //! anyone it was handed to (gift / transfer) are trusted and never trigger it.
+//! Viewers may also share a rounded location; two such scans farther apart than
+//! anyone could travel in the time between them flag the unit too (Kyiv and Lviv
+//! within an hour), and many different devices scanning an unsold unit raise a
+//! softer warning. The brand gets a notification when a unit is flagged.
 
 use axum::{
     extract::{Path, Query, State},
@@ -57,6 +61,14 @@ const MAX_SCANS_PER_UNIT: usize = 40;
 const CLONE_WINDOW_HOURS: i64 = 24;
 /// Previous owners stay trusted for a while after handing the item over.
 const TRUSTED_AFTER_HANDOVER_DAYS: i64 = 7;
+/// Faster than this between two scans means two copies (a plane is ~900 km/h).
+const MAX_TRAVEL_KMH: f64 = 800.0;
+/// Within one country an item moves by road or rail (Ukraine has no flights).
+const MAX_GROUND_KMH: f64 = 250.0;
+/// Closer than this is the same place (locations are rounded to ~10 km).
+const MIN_CLONE_DISTANCE_KM: f64 = 60.0;
+/// An unsold item scanned from this many different devices looks copied.
+const MANY_DEVICES: usize = 25;
 
 const CATEGORIES: &[&str] = &["wine", "spirits", "beer", "dairy", "food", "cosmetics", "other"];
 /// Supply-chain stages in order; `note` and `lab` don't move the stage.
@@ -155,7 +167,50 @@ pub struct Transfer {
 #[serde(rename_all = "camelCase")]
 pub struct CloneFlag {
     pub at: String,
+    #[serde(default)]
     pub regions: Vec<String>,
+    /// "countries", "distance" (impossible travel) or "devices" (soft warning).
+    #[serde(default = "countries")]
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance_km: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hours: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<usize>,
+}
+
+fn countries() -> String {
+    "countries".into()
+}
+
+impl CloneFlag {
+    /// Countries and impossible travel prove two copies; many devices only hints at it.
+    pub fn is_hard(&self) -> bool {
+        self.reason != "devices"
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Geo {
+    pub lat: f64,
+    pub lng: f64,
+}
+
+impl Geo {
+    /// Rounded to 0.1° (~10 km): enough to tell cities apart, too coarse to find a home.
+    fn rounded(lat: f64, lng: f64) -> Option<Geo> {
+        let ok = lat.is_finite() && lng.is_finite() && lat.abs() <= 90.0 && lng.abs() <= 180.0;
+        ok.then(|| Geo { lat: (lat * 10.0).round() / 10.0, lng: (lng * 10.0).round() / 10.0 })
+    }
+
+    fn km_to(&self, other: &Geo) -> f64 {
+        let (la1, la2) = (self.lat.to_radians(), other.lat.to_radians());
+        let dla = la2 - la1;
+        let dlo = (other.lng - self.lng).to_radians();
+        let a = (dla / 2.0).sin().powi(2) + la1.cos() * la2.cos() * (dlo / 2.0).sin().powi(2);
+        6_371.0 * 2.0 * a.sqrt().asin()
+    }
 }
 
 /// One scan of a unit code, kept in `goods_scans/{batchId}.s_<code>`.
@@ -168,6 +223,9 @@ pub struct Scan {
     pub device: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<String>,
+    /// Shared only when the viewer allows location; rounded to ~10 km.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geo: Option<Geo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,6 +335,15 @@ impl ViewQuery {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LocateRequest {
+    pub lat: f64,
+    pub lng: f64,
+    #[serde(default)]
+    pub tz: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AcceptRequest {
     pub token: String,
 }
@@ -297,6 +364,8 @@ pub struct BatchSummary {
     pub expires_at: String,
     pub size: usize,
     pub claimed: usize,
+    /// Units flagged as probable copies.
+    pub flagged: usize,
     pub stage: String,
     pub created_at: String,
 }
@@ -453,6 +522,7 @@ fn summary(b: &Batch) -> BatchSummary {
         expires_at: b.expires_at.clone(),
         size: if b.mode == "unit" { b.units.len() } else { 0 },
         claimed: b.claimed(),
+        flagged: b.units.iter().filter(|u| u.flag.is_some()).count(),
         stage: b.stage().to_owned(),
         created_at: b.created_at.clone(),
     }
@@ -475,6 +545,7 @@ fn split_code(code: &str) -> ApiResult<(String, Option<String>)> {
 pub struct ScanInput {
     pub region: String,
     pub device: String,
+    pub geo: Option<Geo>,
 }
 
 impl ScanInput {
@@ -484,7 +555,7 @@ impl ScanInput {
         let ip = header("x-forwarded-for").split(',').next().unwrap_or_default().trim();
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         (SCAN_SALT.as_str(), ip, header("user-agent")).hash(&mut hasher);
-        ScanInput { region: region_of(tz.unwrap_or_default()), device: format!("{:016x}", hasher.finish()) }
+        ScanInput { region: region_of(tz.unwrap_or_default()), device: format!("{:016x}", hasher.finish()), geo: None }
     }
 }
 
@@ -559,19 +630,90 @@ fn trusted_uids(unit: &Unit, now: DateTime<Utc>) -> BTreeSet<String> {
 /// Regions seen within the clone window from at least two devices, ignoring
 /// trusted people. Two or more regions means two copies of one label.
 pub fn clone_regions(scans: &[Scan], trusted: &BTreeSet<String>, now: DateTime<Utc>) -> Vec<String> {
-    let since = now - Duration::hours(CLONE_WINDOW_HOURS);
-    let recent: Vec<&Scan> = scans
-        .iter()
-        .filter(|s| s.region != "?")
-        .filter(|s| parse_time(&s.at).is_some_and(|t| t >= since))
-        .filter(|s| s.uid.as_ref().is_none_or(|u| !trusted.contains(u)))
-        .collect();
-    let regions: BTreeSet<&str> = recent.iter().map(|s| s.region.as_str()).collect();
-    let devices: BTreeSet<&str> = recent.iter().map(|s| s.device.as_str()).collect();
+    let recent = untrusted_recent(scans, trusted, now);
+    let located: Vec<&&Scan> = recent.iter().filter(|s| s.region != "?").collect();
+    let regions: BTreeSet<&str> = located.iter().map(|s| s.region.as_str()).collect();
+    let devices: BTreeSet<&str> = located.iter().map(|s| s.device.as_str()).collect();
     if regions.len() >= 2 && devices.len() >= 2 {
         regions.into_iter().map(str::to_owned).collect()
     } else {
         Vec::new()
+    }
+}
+
+fn untrusted_recent<'a>(scans: &'a [Scan], trusted: &BTreeSet<String>, now: DateTime<Utc>) -> Vec<&'a Scan> {
+    let since = now - Duration::hours(CLONE_WINDOW_HOURS);
+    scans
+        .iter()
+        .filter(|s| parse_time(&s.at).is_some_and(|t| t >= since))
+        .filter(|s| s.uid.as_ref().is_none_or(|u| !trusted.contains(u)))
+        .collect()
+}
+
+/// Two located scans from different devices farther apart than anyone could
+/// travel in the time between them: (km, hours) of the worst pair.
+pub fn impossible_travel(scans: &[Scan], trusted: &BTreeSet<String>, now: DateTime<Utc>) -> Option<(f64, f64)> {
+    let located: Vec<(&Scan, Geo, DateTime<Utc>)> = untrusted_recent(scans, trusted, now)
+        .into_iter()
+        .filter_map(|s| Some((s, s.geo?, parse_time(&s.at)?)))
+        .collect();
+    let mut worst: Option<(f64, f64)> = None;
+    for (i, (a, ga, ta)) in located.iter().enumerate() {
+        for (b, gb, tb) in &located[i + 1..] {
+            if a.device == b.device {
+                continue;
+            }
+            let km = ga.km_to(gb);
+            let hours = (*ta - *tb).num_seconds().abs() as f64 / 3600.0;
+            let speed = if a.region == b.region { MAX_GROUND_KMH } else { MAX_TRAVEL_KMH };
+            if km >= MIN_CLONE_DISTANCE_KM && km > speed * hours && worst.is_none_or(|(w, _)| km > w) {
+                worst = Some((km, hours));
+            }
+        }
+    }
+    worst
+}
+
+/// What the scans of one unit say about copies, strongest reason first.
+pub fn detect(scans: &[Scan], trusted: &BTreeSet<String>, now: DateTime<Utc>, sold: bool) -> Option<CloneFlag> {
+    let at = now.to_rfc3339();
+    let regions = clone_regions(scans, trusted, now);
+    if !regions.is_empty() {
+        return Some(CloneFlag { at, regions, reason: "countries".into(), distance_km: None, hours: None, devices: None });
+    }
+    if let Some((km, hours)) = impossible_travel(scans, trusted, now) {
+        return Some(CloneFlag {
+            at,
+            regions: Vec::new(),
+            reason: "distance".into(),
+            distance_km: Some(km.round() as u32),
+            hours: Some((hours * 10.0).round() / 10.0),
+            devices: None,
+        });
+    }
+    let devices: BTreeSet<&str> = scans.iter().filter(|s| s.uid.as_ref().is_none_or(|u| !trusted.contains(u))).map(|s| s.device.as_str()).collect();
+    if !sold && devices.len() >= MANY_DEVICES {
+        return Some(CloneFlag { at, regions: Vec::new(), reason: "devices".into(), distance_km: None, hours: None, devices: Some(devices.len()) });
+    }
+    None
+}
+
+/// Why a unit was flagged, in words for buyers and the brand.
+fn flag_text(f: &CloneFlag) -> String {
+    match f.reason.as_str() {
+        "distance" => format!(
+            "Ймовірна підробка: цей код сканували в місцях за ~{} км одне від одного з різницею {} год. Справжня пляшка так швидко не переміщується — хтось скопіював етикетку.",
+            f.distance_km.unwrap_or_default(),
+            f.hours.unwrap_or_default()
+        ),
+        "devices" => format!(
+            "Цей код сканували вже з {} різних пристроїв, хоча товар ще не продано. Можливо, етикетку скопійовано — купуйте лише в перевірених продавців.",
+            f.devices.unwrap_or_default()
+        ),
+        _ => format!(
+            "Ймовірна підробка: цей код за добу сканували в різних країнах ({}). Справжня пляшка не може бути у двох місцях одночасно — хтось скопіював етикетку.",
+            f.regions.join(", ")
+        ),
     }
 }
 
@@ -587,8 +729,22 @@ async fn record_scan(state: &AppState, batch_id: &str, code: &str, scan: Option<
         .unwrap_or_default();
     let mut count = doc.get(&count_field).and_then(Value::as_u64).unwrap_or(0);
     if let Some(scan) = scan {
-        count += 1;
-        scans.push(scan);
+        // A location shared right after a scan belongs to that scan, not a new one.
+        let recent_same_device = scan.geo.is_some().then(|| {
+            scans.iter_mut().rev().find(|s| {
+                s.device == scan.device
+                    && parse_time(&s.at).is_some_and(|t| Utc::now() - t < Duration::minutes(30))
+            })
+        }).flatten();
+        if let Some(previous) = recent_same_device {
+            previous.geo = scan.geo;
+            if previous.uid.is_none() {
+                previous.uid = scan.uid;
+            }
+        } else {
+            count += 1;
+            scans.push(scan);
+        }
         if scans.len() > MAX_SCANS_PER_UNIT {
             scans.drain(..scans.len() - MAX_SCANS_PER_UNIT);
         }
@@ -602,15 +758,34 @@ async fn record_scan(state: &AppState, batch_id: &str, code: &str, scan: Option<
     (count, scans)
 }
 
-/// Marks a unit as a probable clone (once).
-async fn flag_unit(state: &AppState, batch_id: &str, code: &str, regions: Vec<String>) -> ApiResult<()> {
+/// Marks a unit as a probable clone and tells the brand. A soft flag (many
+/// devices) is replaced by a hard one; nothing else is overwritten.
+async fn flag_unit(state: &AppState, batch_id: &str, code: &str, flag: CloneFlag) -> ApiResult<()> {
     let _guard = BATCH_LOCK.lock().await;
     let mut batch: Batch = load(state, BATCHES, batch_id, "Batch").await?;
-    if let Some(u) = batch.units.iter_mut().find(|u| u.code == code) {
-        if u.flag.is_none() {
-            u.flag = Some(CloneFlag { at: Utc::now().to_rfc3339(), regions });
-            save(state, BATCHES, batch_id, &batch).await?;
-        }
+    let Some(u) = batch.units.iter_mut().find(|u| u.code == code) else { return Ok(()) };
+    if u.flag.as_ref().is_some_and(|f| f.is_hard() || !flag.is_hard()) {
+        return Ok(());
+    }
+    let serial = u.serial;
+    let text = flag_text(&flag);
+    u.flag = Some(flag);
+    save(state, BATCHES, batch_id, &batch).await?;
+
+    let product = load::<Product>(state, PRODUCTS, &batch.product_id, "Product").await.map(|p| p.name).unwrap_or_default();
+    let id = Uuid::new_v4().to_string();
+    let doc = json!({
+        "id": id,
+        "userId": batch.owner_id,
+        "type": crate::models::NotificationType::System,
+        "title": "⚠️ Підозра на підробку",
+        "text": format!("«{product}», партія {}, № {serial}. {text}", batch.lot),
+        "read": false,
+        "createdAt": Utc::now().to_rfc3339(),
+        "metadata": crate::models::NotificationMeta { nft_title: Some(product), ..Default::default() },
+    });
+    if let Err(e) = state.firestore.set("notifications", &id, &doc).await {
+        tracing::warn!(error = %e, "Failed to notify the brand about a suspected clone");
     }
     Ok(())
 }
@@ -637,28 +812,27 @@ async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, scan: Op
 
     let now = Utc::now();
     let code_lc = code.to_ascii_lowercase();
-    let scan = scan.map(|s| Scan { at: now.to_rfc3339(), region: s.region, device: s.device, uid: viewer.map(str::to_owned) });
+    let scan = scan.map(|s| Scan { at: now.to_rfc3339(), region: s.region, device: s.device, uid: viewer.map(str::to_owned), geo: s.geo });
     let (scans, recent) = record_scan(state, &batch.id, &code_lc, scan).await;
 
     // Clone check: only unit codes; batch codes are on many packs by design.
     if let Some(u) = unit.as_mut() {
-        if u.flag.is_none() {
-            let regions = clone_regions(&recent, &trusted_uids(u, now), now);
-            if !regions.is_empty() {
-                let _ = flag_unit(state, &batch.id, &u.code, regions.clone()).await;
-                u.flag = Some(CloneFlag { at: now.to_rfc3339(), regions });
+        if !u.flag.as_ref().is_some_and(CloneFlag::is_hard) {
+            let found = detect(&recent, &trusted_uids(u, now), now, u.owner_id.is_some());
+            if let Some(flag) = found.filter(|f| u.flag.is_none() || f.is_hard()) {
+                let _ = flag_unit(state, &batch.id, &u.code, flag.clone()).await;
+                u.flag = Some(flag);
             }
         }
     }
 
     let mut warnings = Vec::new();
     let mine = matches!((&unit, viewer), (Some(u), Some(v)) if u.owner_id.as_deref() == Some(v));
-    let suspicious_regions = unit.as_ref().and_then(|u| u.flag.as_ref()).map(|f| f.regions.clone()).unwrap_or_default();
-    if !suspicious_regions.is_empty() {
-        warnings.push(format!(
-            "Ймовірна підробка: цей код за добу сканували в різних країнах ({}). Справжня пляшка не може бути у двох місцях одночасно — хтось скопіював етикетку.",
-            suspicious_regions.join(", ")
-        ));
+    let flag = unit.as_ref().and_then(|u| u.flag.clone());
+    let suspicious = flag.as_ref().is_some_and(CloneFlag::is_hard);
+    let suspicious_regions = flag.as_ref().map(|f| f.regions.clone()).unwrap_or_default();
+    if let Some(f) = &flag {
+        warnings.push(flag_text(f));
     }
     if let Some(u) = &unit {
         if u.owner_id.is_some() && !mine {
@@ -695,7 +869,7 @@ async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, scan: Op
         }),
         stage: batch.stage().to_owned(),
         events: batch.events.clone(),
-        suspicious: !suspicious_regions.is_empty(),
+        suspicious,
         suspicious_regions,
         protection: "qr".into(),
         warnings,
@@ -1037,6 +1211,21 @@ pub async fn my_goods(
     Ok(Json(out))
 }
 
+/// `POST /api/public/goods/:code/locate` — the viewer shares a location for the
+/// scan they just made (optional; rounded to ~10 km before it is stored).
+pub async fn locate(
+    State(state): State<Arc<AppState>>,
+    Path(code): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<LocateRequest>,
+) -> ApiResult<StatusCode> {
+    let geo = Geo::rounded(req.lat, req.lng).ok_or_else(|| AppError::BadRequest("Invalid location".into()))?;
+    let mut scan = ScanInput::from_request(&headers, req.tz.as_deref());
+    scan.geo = Some(geo);
+    build_view(&state, &code, None, Some(scan)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Loads a batch and the unit behind `code` for a write (call under `BATCH_LOCK`).
 async fn load_unit(state: &AppState, code: &str) -> ApiResult<(Batch, usize)> {
     let (batch_id, unit_code) = split_code(code)?;
@@ -1192,7 +1381,7 @@ mod tests {
     }
 
     fn scan(hours_ago: i64, region: &str, device: &str, uid: Option<&str>) -> Scan {
-        Scan { at: (Utc::now() - Duration::hours(hours_ago)).to_rfc3339(), region: region.into(), device: device.into(), uid: uid.map(Into::into) }
+        Scan { at: (Utc::now() - Duration::hours(hours_ago)).to_rfc3339(), region: region.into(), device: device.into(), uid: uid.map(Into::into), geo: None }
     }
 
     #[test]
@@ -1223,5 +1412,41 @@ mod tests {
         let q = |p: Option<&str>| ViewQuery { tz: None, peek: p.map(Into::into) };
         assert!(q(Some("1")).peek() && q(Some("true")).peek());
         assert!(!q(None).peek() && !q(Some("0")).peek());
+    }
+
+    fn located(hours_ago: f64, lat: f64, lng: f64, device: &str) -> Scan {
+        Scan {
+            at: (Utc::now() - Duration::seconds((hours_ago * 3600.0) as i64)).to_rfc3339(),
+            region: "UA".into(), device: device.into(), uid: None, geo: Geo::rounded(lat, lng),
+        }
+    }
+
+    #[test]
+    fn kyiv_and_lviv_within_an_hour_is_impossible_travel() {
+        let none = BTreeSet::new();
+        let now = Utc::now();
+        let kyiv = (50.45, 30.52);
+        let lviv = (49.84, 24.03);
+        // ~470 km in one hour, same country (same time zone) → clone.
+        let f = detect(&[located(1.0, kyiv.0, kyiv.1, "a"), located(0.0, lviv.0, lviv.1, "b")], &none, now, false).unwrap();
+        assert_eq!(f.reason, "distance");
+        assert!((440..=500).contains(&f.distance_km.unwrap()));
+        // The same trip over 12 hours is a normal drive.
+        assert!(detect(&[located(12.0, kyiv.0, kyiv.1, "a"), located(0.0, lviv.0, lviv.1, "b")], &none, now, false).is_none());
+        // Two shops in one city, or the same phone travelling, are fine.
+        assert!(detect(&[located(1.0, 50.45, 30.52, "a"), located(0.0, 50.40, 30.60, "b")], &none, now, false).is_none());
+        assert!(detect(&[located(1.0, kyiv.0, kyiv.1, "a"), located(0.0, lviv.0, lviv.1, "a")], &none, now, false).is_none());
+    }
+
+    #[test]
+    fn many_devices_on_an_unsold_item_is_a_soft_warning() {
+        let none = BTreeSet::new();
+        let now = Utc::now();
+        let scans: Vec<Scan> = (0..MANY_DEVICES).map(|i| scan(1, "UA", &format!("d{i}"), None)).collect();
+        let f = detect(&scans, &none, now, false).unwrap();
+        assert_eq!(f.reason, "devices");
+        assert!(!f.is_hard());
+        // After the sale, guests scanning a bottle at a party are expected.
+        assert!(detect(&scans, &none, now, true).is_none());
     }
 }

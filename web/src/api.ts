@@ -509,6 +509,8 @@ export interface GoodsBatchSummary {
   expiresAt: string;
   size: number;
   claimed: number;
+  /** Units flagged as probable copies. */
+  flagged: number;
   stage: GoodsStage;
   createdAt: string;
 }
@@ -527,8 +529,16 @@ export interface GoodsUnit {
   ownerId?: string;
   ownerName?: string;
   claimedAt?: string;
-  /** Set when the code was seen in two countries within a day. */
-  flag?: { at: string; regions: string[] };
+  /** Set when scans look like a copied label. */
+  flag?: {
+    at: string;
+    /** 'countries' and 'distance' prove a copy; 'devices' only hints at one. */
+    reason: 'countries' | 'distance' | 'devices';
+    regions: string[];
+    distanceKm?: number;
+    hours?: number;
+    devices?: number;
+  };
 }
 
 export interface GoodsBatch {

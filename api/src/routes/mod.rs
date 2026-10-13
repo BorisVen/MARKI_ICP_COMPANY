@@ -139,6 +139,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/public/nfts/:owner_id/:nft_id/view", post(public::view_passport))
         .route("/public/gifts/:code", get(gifts::preview_gift))
         .route("/public/goods/:code", get(goods::public_verify))
+        .route("/public/goods/:code/locate", post(goods::locate))
         .route("/ai/generate",   post(ai::generate_image));
 
     Router::new().merge(protected).merge(public)
