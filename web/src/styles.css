@@ -1832,3 +1832,5 @@ details.soft[open] summary { margin-bottom: 10px; }
 .goods-stats > div { background: var(--bg-soft); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
 .goods-stats strong { font-size: 18px; }
 .goods-stats span { font-size: 11px; color: var(--muted); }
+.goods-stats > div.danger strong { color: var(--danger); }
+.goods-flag { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; flex-wrap: wrap; }

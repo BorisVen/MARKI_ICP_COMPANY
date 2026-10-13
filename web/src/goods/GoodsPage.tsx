@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import QRCode from 'qrcode';
 import {
-  apiAddGoodsEvent, apiCreateGoodsBatch, apiCreateGoodsProduct, apiGoodsBatch, apiGoodsProducts,
+  apiAddGoodsEvent, apiClearGoodsFlag, apiCreateGoodsBatch, apiCreateGoodsProduct, apiGoodsBatch, apiGoodsProducts,
   type GoodsBatch, type GoodsBatchSummary, type GoodsCategory, type GoodsEventKind, type GoodsProduct,
 } from '../api';
 import EmptyState from '../EmptyState';
@@ -307,6 +307,12 @@ function BatchModal({ product, batchId, onClose }: { product: GoodsProduct; batc
   };
 
   const claimed = batch?.units.filter(u => u.ownerId).length ?? 0;
+  const flagged = batch?.units.filter(u => u.flag) ?? [];
+
+  const clearFlag = async (serial: number) => {
+    if (!confirm(`Зняти позначку підробки з № ${serial}? Робіть це, лише якщо впевнені, що це не копія етикетки.`)) return;
+    try { setBatch(await apiClearGoodsFlag(batchId, serial)); } catch (e: any) { alert(e?.message ?? 'Не вдалося'); }
+  };
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -320,7 +326,20 @@ function BatchModal({ product, batchId, onClose }: { product: GoodsProduct; batc
               <div><strong>{product.mode === 'unit' ? batch.units.length : 1}</strong><span>QR-кодів</span></div>
               {product.mode === 'unit' && <div><strong>{claimed}</strong><span>куплено й зареєстровано</span></div>}
               <div><strong>{batch.expiresAt || '—'}</strong><span>придатний до</span></div>
+              {product.mode === 'unit' && <div className={flagged.length ? 'danger' : ''}><strong>{flagged.length}</strong><span>підозра на підробку</span></div>}
             </div>
+
+            {flagged.length > 0 && (
+              <div className="notice notice-warn" style={{ marginTop: 12 }}>
+                <strong>Коди, які сканували в різних країнах за добу:</strong>
+                {flagged.map(u => (
+                  <div key={u.serial} className="goods-flag">
+                    <span>№ {u.serial} · {u.flag!.regions.join(', ')} · {fmtDateTime(u.flag!.at)}</span>
+                    <button className="btn" onClick={() => clearFlag(u.serial)}>Зняти позначку</button>
+                  </div>
+                ))}
+              </div>
+            )}
 
             <button className="btn btn-primary btn-block" onClick={print} disabled={printing} style={{ marginTop: 12 }}>
               <Icon.QrCode /> {printing ? 'Готуємо етикетки…' : product.mode === 'unit' ? `Друкувати ${batch.units.length} QR-етикеток` : 'Друкувати QR партії'}

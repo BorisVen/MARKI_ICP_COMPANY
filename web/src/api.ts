@@ -527,6 +527,8 @@ export interface GoodsUnit {
   ownerId?: string;
   ownerName?: string;
   claimedAt?: string;
+  /** Set when the code was seen in two countries within a day. */
+  flag?: { at: string; regions: string[] };
 }
 
 export interface GoodsBatch {
@@ -554,10 +556,20 @@ export interface GoodsVerifyView {
   expiresAt: string;
   attributes: Record<string, string>;
   batchSize: number;
-  unit?: { serial: number; claimed: boolean; claimedAt?: string; mine: boolean };
+  unit?: {
+    serial: number; claimed: boolean; claimedAt?: string; mine: boolean;
+    owners: { name: string; at: string; via: 'receipt' | 'gift' }[];
+    /** The owner's pending handover token (only for the owner). */
+    transferToken?: string;
+  };
   stage: GoodsStage;
   events: GoodsEvent[];
   warnings: string[];
+  /** Seen in two countries at once: very likely a copied label. */
+  suspicious: boolean;
+  suspiciousRegions?: string[];
+  /** 'qr' today; 'nfc' for signed chips later. */
+  protection: 'qr' | 'nfc';
   scans: number;
 }
 
@@ -571,5 +583,7 @@ export const apiCreateGoodsBatch = (productId: string, body: {
   attributes?: Record<string, string>; location?: string;
 }) => post<GoodsBatch>(`/api/goods/products/${encodeURIComponent(productId)}/batches`, body);
 export const apiGoodsBatch = (id: string) => get<GoodsBatch>(`/api/goods/batches/${encodeURIComponent(id)}`);
+export const apiClearGoodsFlag = (batchId: string, serial: number) =>
+  del<GoodsBatch>(`/api/goods/batches/${encodeURIComponent(batchId)}/units/${serial}/flag`);
 export const apiAddGoodsEvent = (id: string, body: { kind: GoodsEventKind; location?: string; note?: string }) =>
   post<GoodsBatch>(`/api/goods/batches/${encodeURIComponent(id)}/events`, body);

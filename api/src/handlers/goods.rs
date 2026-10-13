@@ -12,17 +12,24 @@
 //! `goods_scans/{batchId}` (scan counters). A unit code is the batch id followed
 //! by 8 random chars, so a scan loads exactly one batch document. Batch writes go
 //! through one process-wide lock, like gift claims (the API runs as one instance).
+//!
+//! Clone detection: a printed QR can be copied, so every scan of a unit is logged
+//! with a coarse region (the phone's time zone → country) and an anonymous device
+//! hash. If people other than the owner scan one code from two countries within a
+//! day, the unit is flagged as a probable fake and everyone sees it. The owner and
+//! anyone it was handed to (gift / transfer) are trusted and never trigger it.
 
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
     Extension, Json,
 };
 use base64::Engine;
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -44,6 +51,12 @@ const MAX_UNITS: u32 = 2_000;
 /// One receipt may cover several bottles, but not a whole shelf.
 const MAX_UNITS_PER_RECEIPT: usize = 24;
 const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+/// Scans kept per unit for clone detection.
+const MAX_SCANS_PER_UNIT: usize = 40;
+/// Two countries within this window means two physical copies of one code.
+const CLONE_WINDOW_HOURS: i64 = 24;
+/// Previous owners stay trusted for a while after handing the item over.
+const TRUSTED_AFTER_HANDOVER_DAYS: i64 = 7;
 
 const CATEGORIES: &[&str] = &["wine", "spirits", "beer", "dairy", "food", "cosmetics", "other"];
 /// Supply-chain stages in order; `note` and `lab` don't move the stage.
@@ -109,6 +122,52 @@ pub struct Unit {
     pub claimed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<Receipt>,
+    /// Ownership chain: the receipt claim, then every handover.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owners: Vec<UnitOwner>,
+    /// Pending handover link created by the owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<Transfer>,
+    /// Set when the code was seen in two countries at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<CloneFlag>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnitOwner {
+    pub uid: String,
+    pub name: String,
+    pub at: String,
+    /// "receipt" or "gift".
+    pub via: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Transfer {
+    pub token: String,
+    pub from_uid: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneFlag {
+    pub at: String,
+    pub regions: Vec<String>,
+}
+
+/// One scan of a unit code, kept in `goods_scans/{batchId}.s_<code>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Scan {
+    pub at: String,
+    pub region: String,
+    /// Salted hash of IP + user agent: tells devices apart without storing either.
+    pub device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +260,23 @@ pub struct AddEventRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ViewQuery {
+    /// The viewer's IANA time zone (e.g. `Europe/Kyiv`), for the scan region.
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// Re-check without counting a scan (the page polls while open).
+    #[serde(default)]
+    pub peek: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClaimRequest {
     /// Text of the fiscal receipt QR (a tax-office URL with fn/id/date/sm).
     pub receipt: String,
@@ -236,6 +312,19 @@ pub struct UnitView {
     pub claimed_at: Option<String>,
     /// The signed-in viewer owns it (only on the authenticated endpoint).
     pub mine: bool,
+    /// Owner names, oldest first (receipt buyer, then gift receivers).
+    pub owners: Vec<UnitOwnerView>,
+    /// The owner's pending handover token (only shown to the owner).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_token: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnitOwnerView {
+    pub name: String,
+    pub at: String,
+    pub via: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -257,6 +346,12 @@ pub struct VerifyView {
     pub events: Vec<BatchEvent>,
     /// Human-readable reasons to be careful, shown above everything else.
     pub warnings: Vec<String>,
+    /// The code was seen in two countries at once: very likely a copied label.
+    pub suspicious: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suspicious_regions: Vec<String>,
+    /// How the item is protected: "qr" today, "nfc" for signed chips later.
+    pub protection: String,
     pub scans: u64,
 }
 
@@ -370,11 +465,155 @@ fn split_code(code: &str) -> ApiResult<(String, Option<String>)> {
     }
 }
 
-async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, count_scan: bool) -> ApiResult<VerifyView> {
+/// Where a scan came from, as reported by the request.
+pub struct ScanInput {
+    pub region: String,
+    pub device: String,
+}
+
+impl ScanInput {
+    fn from_request(headers: &HeaderMap, tz: Option<&str>) -> Self {
+        let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default();
+        // Render puts the client address first in X-Forwarded-For.
+        let ip = header("x-forwarded-for").split(',').next().unwrap_or_default().trim();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (SCAN_SALT.as_str(), ip, header("user-agent")).hash(&mut hasher);
+        ScanInput { region: region_of(tz.unwrap_or_default()), device: format!("{:016x}", hasher.finish()) }
+    }
+}
+
+/// Salt for device hashes, so they can't be matched to IPs outside this server.
+static SCAN_SALT: LazyLock<String> =
+    LazyLock::new(|| std::env::var("GOODS_SCAN_SALT").unwrap_or_else(|_| Uuid::new_v4().to_string()));
+
+/// Coarse region of a scan: the country of the phone's time zone, else the zone itself.
+pub fn region_of(tz: &str) -> String {
+    let tz = tz.trim();
+    let country = match tz {
+        "Europe/Kyiv" | "Europe/Kiev" | "Europe/Uzhgorod" | "Europe/Zaporozhye" | "Europe/Simferopol" => "UA",
+        "Europe/Madrid" | "Atlantic/Canary" | "Africa/Ceuta" => "ES",
+        "Europe/Warsaw" => "PL",
+        "Europe/Berlin" | "Europe/Busingen" => "DE",
+        "Europe/Paris" => "FR",
+        "Europe/Rome" => "IT",
+        "Europe/Lisbon" | "Atlantic/Madeira" | "Atlantic/Azores" => "PT",
+        "Europe/London" => "GB",
+        "Europe/Prague" => "CZ",
+        "Europe/Bratislava" => "SK",
+        "Europe/Budapest" => "HU",
+        "Europe/Bucharest" => "RO",
+        "Europe/Chisinau" => "MD",
+        "Europe/Vienna" => "AT",
+        "Europe/Amsterdam" => "NL",
+        "Europe/Brussels" => "BE",
+        "Europe/Zurich" => "CH",
+        "Europe/Istanbul" => "TR",
+        "Europe/Vilnius" => "LT",
+        "Europe/Riga" => "LV",
+        "Europe/Tallinn" => "EE",
+        "Europe/Tbilisi" | "Asia/Tbilisi" => "GE",
+        "Europe/Athens" => "GR",
+        "Europe/Sofia" => "BG",
+        "Europe/Dublin" => "IE",
+        "Europe/Stockholm" => "SE",
+        "Europe/Oslo" => "NO",
+        "Europe/Copenhagen" => "DK",
+        "Europe/Helsinki" => "FI",
+        "Asia/Dubai" => "AE",
+        _ => "",
+    };
+    if !country.is_empty() {
+        return country.to_owned();
+    }
+    let zone: String = tz.chars().filter(|c| c.is_ascii_alphanumeric() || "/_-".contains(*c)).take(40).collect();
+    if zone.is_empty() { "?".into() } else { zone }
+}
+
+fn parse_time(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+}
+
+/// Uids whose scans never count as a clone: the owner, recent previous owners
+/// and whoever holds a pending handover link's sender role.
+fn trusted_uids(unit: &Unit, now: DateTime<Utc>) -> BTreeSet<String> {
+    let mut trusted: BTreeSet<String> = unit.owner_id.iter().cloned().collect();
+    let since = now - Duration::days(TRUSTED_AFTER_HANDOVER_DAYS);
+    for (i, o) in unit.owners.iter().enumerate() {
+        let handed_over_at = unit.owners.get(i + 1).and_then(|next| parse_time(&next.at));
+        if handed_over_at.is_some_and(|t| t >= since) {
+            trusted.insert(o.uid.clone());
+        }
+    }
+    if let Some(t) = &unit.transfer {
+        trusted.insert(t.from_uid.clone());
+    }
+    trusted
+}
+
+/// Regions seen within the clone window from at least two devices, ignoring
+/// trusted people. Two or more regions means two copies of one label.
+pub fn clone_regions(scans: &[Scan], trusted: &BTreeSet<String>, now: DateTime<Utc>) -> Vec<String> {
+    let since = now - Duration::hours(CLONE_WINDOW_HOURS);
+    let recent: Vec<&Scan> = scans
+        .iter()
+        .filter(|s| s.region != "?")
+        .filter(|s| parse_time(&s.at).is_some_and(|t| t >= since))
+        .filter(|s| s.uid.as_ref().is_none_or(|u| !trusted.contains(u)))
+        .collect();
+    let regions: BTreeSet<&str> = recent.iter().map(|s| s.region.as_str()).collect();
+    let devices: BTreeSet<&str> = recent.iter().map(|s| s.device.as_str()).collect();
+    if regions.len() >= 2 && devices.len() >= 2 {
+        regions.into_iter().map(str::to_owned).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Logs a scan of `code` and returns its total count and recent scans.
+/// Failures never block a check.
+async fn record_scan(state: &AppState, batch_id: &str, code: &str, scan: Option<Scan>) -> (u64, Vec<Scan>) {
+    let doc = state.firestore.get(SCANS, batch_id).await.ok().flatten().unwrap_or_else(|| json!({}));
+    let count_field = format!("c_{code}");
+    let list_field = format!("s_{code}");
+    let mut scans: Vec<Scan> = doc
+        .get(&list_field)
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let mut count = doc.get(&count_field).and_then(Value::as_u64).unwrap_or(0);
+    if let Some(scan) = scan {
+        count += 1;
+        scans.push(scan);
+        if scans.len() > MAX_SCANS_PER_UNIT {
+            scans.drain(..scans.len() - MAX_SCANS_PER_UNIT);
+        }
+        let total = doc.get("total").and_then(Value::as_u64).unwrap_or(0) + 1;
+        let mut fields = serde_json::Map::new();
+        fields.insert(count_field, json!(count));
+        fields.insert(list_field, json!(scans));
+        fields.insert("total".into(), json!(total));
+        let _ = state.firestore.update(SCANS, batch_id, &Value::Object(fields)).await;
+    }
+    (count, scans)
+}
+
+/// Marks a unit as a probable clone (once).
+async fn flag_unit(state: &AppState, batch_id: &str, code: &str, regions: Vec<String>) -> ApiResult<()> {
+    let _guard = BATCH_LOCK.lock().await;
+    let mut batch: Batch = load(state, BATCHES, batch_id, "Batch").await?;
+    if let Some(u) = batch.units.iter_mut().find(|u| u.code == code) {
+        if u.flag.is_none() {
+            u.flag = Some(CloneFlag { at: Utc::now().to_rfc3339(), regions });
+            save(state, BATCHES, batch_id, &batch).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, scan: Option<ScanInput>) -> ApiResult<VerifyView> {
     let (batch_id, unit_code) = split_code(code)?;
     let batch: Batch = load(state, BATCHES, &batch_id, "Code").await?;
     let product: Product = load(state, PRODUCTS, &batch.product_id, "Product").await?;
-    let unit = match &unit_code {
+    let mut unit = match &unit_code {
         Some(c) => Some(
             batch
                 .units
@@ -390,10 +629,31 @@ async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, count_sc
     let brand = user_doc(state, &batch.owner_id).await?;
     let brand_verified = brand.get("companyApproved").and_then(Value::as_bool).unwrap_or(false);
 
-    let scans = if count_scan { bump_scans(state, &batch.id, code).await } else { 0 };
+    let now = Utc::now();
+    let code_lc = code.to_ascii_lowercase();
+    let scan = scan.map(|s| Scan { at: now.to_rfc3339(), region: s.region, device: s.device, uid: viewer.map(str::to_owned) });
+    let (scans, recent) = record_scan(state, &batch.id, &code_lc, scan).await;
+
+    // Clone check: only unit codes; batch codes are on many packs by design.
+    if let Some(u) = unit.as_mut() {
+        if u.flag.is_none() {
+            let regions = clone_regions(&recent, &trusted_uids(u, now), now);
+            if !regions.is_empty() {
+                let _ = flag_unit(state, &batch.id, &u.code, regions.clone()).await;
+                u.flag = Some(CloneFlag { at: now.to_rfc3339(), regions });
+            }
+        }
+    }
 
     let mut warnings = Vec::new();
     let mine = matches!((&unit, viewer), (Some(u), Some(v)) if u.owner_id.as_deref() == Some(v));
+    let suspicious_regions = unit.as_ref().and_then(|u| u.flag.as_ref()).map(|f| f.regions.clone()).unwrap_or_default();
+    if !suspicious_regions.is_empty() {
+        warnings.push(format!(
+            "Ймовірна підробка: цей код за добу сканували в різних країнах ({}). Справжня пляшка не може бути у двох місцях одночасно — хтось скопіював етикетку.",
+            suspicious_regions.join(", ")
+        ));
+    }
     if let Some(u) = &unit {
         if u.owner_id.is_some() && !mine {
             warnings.push(format!(
@@ -402,7 +662,7 @@ async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, count_sc
             ));
         }
     }
-    if batch.expired(Utc::now().date_naive()) {
+    if batch.expired(now.date_naive()) {
         warnings.push(format!("Термін придатності минув {}.", batch.expires_at));
     }
     if !brand_verified {
@@ -410,7 +670,7 @@ async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, count_sc
     }
 
     Ok(VerifyView {
-        code: code.to_ascii_lowercase(),
+        code: code_lc,
         mode: batch.mode.clone(),
         brand_verified,
         batch_id: batch.id.clone(),
@@ -424,26 +684,18 @@ async fn build_view(state: &AppState, code: &str, viewer: Option<&str>, count_sc
             claimed: u.owner_id.is_some(),
             claimed_at: u.claimed_at.clone(),
             mine,
+            owners: u.owners.iter().map(|o| UnitOwnerView { name: o.name.clone(), at: o.at.clone(), via: o.via.clone() }).collect(),
+            transfer_token: if mine { u.transfer.as_ref().map(|t| t.token.clone()) } else { None },
         }),
         stage: batch.stage().to_owned(),
         events: batch.events.clone(),
+        suspicious: !suspicious_regions.is_empty(),
+        suspicious_regions,
+        protection: "qr".into(),
         warnings,
         scans,
         product,
     })
-}
-
-/// Counts a scan of `code`; failures never block a check.
-async fn bump_scans(state: &AppState, batch_id: &str, code: &str) -> u64 {
-    let doc = state.firestore.get(SCANS, batch_id).await.ok().flatten().unwrap_or_else(|| json!({}));
-    let field = format!("c_{}", code.to_ascii_lowercase());
-    let count = doc.get(&field).and_then(Value::as_u64).unwrap_or(0) + 1;
-    let total = doc.get("total").and_then(Value::as_u64).unwrap_or(0) + 1;
-    let mut fields = serde_json::Map::new();
-    fields.insert(field, json!(count));
-    fields.insert("total".into(), json!(total));
-    let _ = state.firestore.update(SCANS, batch_id, &Value::Object(fields)).await;
-    count
 }
 
 // ── Brand endpoints ─────────────────────────────────────────────────────────
@@ -583,6 +835,9 @@ pub async fn create_batch(
                 owner_name: None,
                 claimed_at: None,
                 receipt: None,
+                owners: Vec::new(),
+                transfer: None,
+                flag: None,
             })
             .collect(),
         events: vec![BatchEvent {
@@ -652,21 +907,27 @@ pub async fn add_event(
 
 // ── Public check, claim, my goods ───────────────────────────────────────────
 
-/// `GET /api/public/goods/:code` — what anyone sees after scanning.
+/// `GET /api/public/goods/:code?tz=…` — what anyone sees after scanning.
 pub async fn public_verify(
     State(state): State<Arc<AppState>>,
     Path(code): Path<String>,
+    Query(q): Query<ViewQuery>,
+    headers: HeaderMap,
 ) -> ApiResult<Json<VerifyView>> {
-    Ok(Json(build_view(&state, &code, None, true).await?))
+    let scan = (!q.peek.unwrap_or(false)).then(|| ScanInput::from_request(&headers, q.tz.as_deref()));
+    Ok(Json(build_view(&state, &code, None, scan).await?))
 }
 
-/// `GET /api/goods/verify/:code` — the same for a signed-in viewer (knows `mine`).
+/// `GET /api/goods/verify/:code?tz=…` — the same for a signed-in viewer (knows `mine`).
 pub async fn verify(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthenticatedUser>,
     Path(code): Path<String>,
+    Query(q): Query<ViewQuery>,
+    headers: HeaderMap,
 ) -> ApiResult<Json<VerifyView>> {
-    Ok(Json(build_view(&state, &code, Some(&auth.uid), true).await?))
+    let scan = (!q.peek.unwrap_or(false)).then(|| ScanInput::from_request(&headers, q.tz.as_deref()));
+    Ok(Json(build_view(&state, &code, Some(&auth.uid), scan).await?))
 }
 
 /// `POST /api/goods/verify/:code/claim` — the buyer registers the item with a receipt.
@@ -723,6 +984,12 @@ pub async fn claim(
         unit.owner_name = Some(text(&me, "name"));
         unit.claimed_at = Some(Utc::now().to_rfc3339());
         unit.receipt = Some(receipt.clone());
+        unit.owners.push(UnitOwner {
+            uid: auth.uid.clone(),
+            name: text(&me, "name"),
+            at: Utc::now().to_rfc3339(),
+            via: "receipt".into(),
+        });
         if !batch.claimed_by.contains(&auth.uid) {
             batch.claimed_by.push(auth.uid.clone());
         }
@@ -736,7 +1003,7 @@ pub async fn claim(
             .map_err(fs_err)?;
     }
 
-    Ok(Json(build_view(&state, &unit_code, Some(&auth.uid), false).await?))
+    Ok(Json(build_view(&state, &unit_code, Some(&auth.uid), None).await?))
 }
 
 /// `GET /api/goods/mine` — items the signed-in user registered.
@@ -752,7 +1019,7 @@ pub async fn my_goods(
     let mut out = Vec::new();
     for b in batches.into_iter().filter_map(|b| serde_json::from_value::<Batch>(b).ok()) {
         for u in b.units.iter().filter(|u| u.owner_id.as_deref() == Some(auth.uid.as_str())) {
-            if let Ok(view) = build_view(&state, &u.code, Some(&auth.uid), false).await {
+            if let Ok(view) = build_view(&state, &u.code, Some(&auth.uid), None).await {
                 out.push(view);
             }
         }
@@ -762,6 +1029,122 @@ pub async fn my_goods(
         at(b).cmp(&at(a))
     });
     Ok(Json(out))
+}
+
+/// Loads a batch and the unit behind `code` for a write (call under `BATCH_LOCK`).
+async fn load_unit(state: &AppState, code: &str) -> ApiResult<(Batch, usize)> {
+    let (batch_id, unit_code) = split_code(code)?;
+    let unit_code = unit_code.ok_or_else(|| AppError::BadRequest("This code is for a whole batch".into()))?;
+    let batch: Batch = load(state, BATCHES, &batch_id, "Code").await?;
+    let idx = batch
+        .units
+        .iter()
+        .position(|u| u.code == unit_code)
+        .ok_or_else(|| AppError::NotFound("Code not found".into()))?;
+    Ok((batch, idx))
+}
+
+/// `POST /api/goods/verify/:code/transfer` — the owner creates a handover link (gift).
+pub async fn create_transfer(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthenticatedUser>,
+    Path(code): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let _guard = BATCH_LOCK.lock().await;
+    let (mut batch, idx) = load_unit(&state, &code).await?;
+    let unit = &mut batch.units[idx];
+    if unit.owner_id.as_deref() != Some(auth.uid.as_str()) {
+        return Err(AppError::Forbidden("Only the owner can hand this item over".into()));
+    }
+    let token = short_id(12);
+    unit.transfer = Some(Transfer { token: token.clone(), from_uid: auth.uid.clone(), created_at: Utc::now().to_rfc3339() });
+    save(&state, BATCHES, &batch.id, &batch).await?;
+    Ok(Json(json!({ "token": token })))
+}
+
+/// `DELETE /api/goods/verify/:code/transfer` — cancels the handover link.
+pub async fn cancel_transfer(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthenticatedUser>,
+    Path(code): Path<String>,
+) -> ApiResult<StatusCode> {
+    let _guard = BATCH_LOCK.lock().await;
+    let (mut batch, idx) = load_unit(&state, &code).await?;
+    let unit = &mut batch.units[idx];
+    if unit.owner_id.as_deref() != Some(auth.uid.as_str()) {
+        return Err(AppError::Forbidden("Not your item".into()));
+    }
+    unit.transfer = None;
+    save(&state, BATCHES, &batch.id, &batch).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/goods/verify/:code/accept` — the receiver takes the item over.
+pub async fn accept_transfer(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthenticatedUser>,
+    Path(code): Path<String>,
+    Json(req): Json<AcceptRequest>,
+) -> ApiResult<Json<VerifyView>> {
+    let me = user_doc(&state, &auth.uid).await?;
+    let unit_code = {
+        let _guard = BATCH_LOCK.lock().await;
+        let (mut batch, idx) = load_unit(&state, &code).await?;
+        let unit = &mut batch.units[idx];
+        let transfer = unit
+            .transfer
+            .clone()
+            .filter(|t| t.token == req.token.trim())
+            .ok_or_else(|| AppError::NotFound("Посилання для передачі недійсне або вже використане".into()))?;
+        if transfer.from_uid == auth.uid {
+            return Err(AppError::Conflict("Це ваш товар — надішліть посилання тому, кому даруєте".into()));
+        }
+        let now = Utc::now().to_rfc3339();
+        if unit.owners.is_empty() {
+            // Claimed before the chain existed: start it with the receipt owner.
+            unit.owners.push(UnitOwner {
+                uid: transfer.from_uid.clone(),
+                name: unit.owner_name.clone().unwrap_or_default(),
+                at: unit.claimed_at.clone().unwrap_or_else(|| now.clone()),
+                via: "receipt".into(),
+            });
+        }
+        unit.owners.push(UnitOwner { uid: auth.uid.clone(), name: text(&me, "name"), at: now, via: "gift".into() });
+        unit.owner_id = Some(auth.uid.clone());
+        unit.owner_name = Some(text(&me, "name"));
+        unit.transfer = None;
+        let unit_code = unit.code.clone();
+        if !batch.claimed_by.contains(&auth.uid) {
+            batch.claimed_by.push(auth.uid.clone());
+        }
+        save(&state, BATCHES, &batch.id, &batch).await?;
+        unit_code
+    };
+    Ok(Json(build_view(&state, &unit_code, Some(&auth.uid), None).await?))
+}
+
+/// `DELETE /api/goods/batches/:id/units/:serial/flag` — the brand clears a false alarm.
+pub async fn clear_flag(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthenticatedUser>,
+    Path((batch_id, serial)): Path<(String, u32)>,
+) -> ApiResult<Json<Batch>> {
+    let _guard = BATCH_LOCK.lock().await;
+    let mut batch: Batch = load(&state, BATCHES, &batch_id, "Batch").await?;
+    if batch.owner_id != auth.uid {
+        return Err(AppError::Forbidden("Not your batch".into()));
+    }
+    let unit = batch
+        .units
+        .iter_mut()
+        .find(|u| u.serial == serial)
+        .ok_or_else(|| AppError::NotFound("Unit not found".into()))?;
+    unit.flag = None;
+    let code = unit.code.clone();
+    save(&state, BATCHES, &batch.id, &batch).await?;
+    // Forget the scans that raised it, or the next scan flags it again.
+    let _ = state.firestore.update(SCANS, &batch.id, &json!({ format!("s_{code}"): [] })).await;
+    Ok(Json(batch))
 }
 
 #[cfg(test)]
@@ -800,5 +1183,32 @@ mod tests {
         b.events.push(ev("in_store"));
         assert_eq!(b.stage(), "in_store");
         assert!(b.expired(NaiveDate::from_ymd_opt(2026, 10, 12).unwrap()));
+    }
+
+    fn scan(hours_ago: i64, region: &str, device: &str, uid: Option<&str>) -> Scan {
+        Scan { at: (Utc::now() - Duration::hours(hours_ago)).to_rfc3339(), region: region.into(), device: device.into(), uid: uid.map(Into::into) }
+    }
+
+    #[test]
+    fn two_countries_in_a_day_flag_a_clone() {
+        let none = BTreeSet::new();
+        let now = Utc::now();
+        // Valencia and Ukraine within hours, different phones → clone.
+        assert_eq!(clone_regions(&[scan(3, "ES", "a", None), scan(1, "UA", "b", None)], &none, now), ["ES", "UA"]);
+        // Same phone travelling, or one country, or two days apart → fine.
+        assert!(clone_regions(&[scan(3, "ES", "a", None), scan(1, "UA", "a", None)], &none, now).is_empty());
+        assert!(clone_regions(&[scan(3, "UA", "a", None), scan(1, "UA", "b", None)], &none, now).is_empty());
+        assert!(clone_regions(&[scan(50, "ES", "a", None), scan(1, "UA", "b", None)], &none, now).is_empty());
+        // The owner (or a gift receiver) scanning abroad is trusted.
+        let trusted: BTreeSet<String> = ["owner".to_string()].into();
+        assert!(clone_regions(&[scan(3, "ES", "a", Some("owner")), scan(1, "UA", "b", None)], &trusted, now).is_empty());
+    }
+
+    #[test]
+    fn time_zones_map_to_countries() {
+        assert_eq!(region_of("Europe/Madrid"), "ES");
+        assert_eq!(region_of("Europe/Kiev"), region_of("Europe/Kyiv"));
+        assert_eq!(region_of("America/New_York"), "America/New_York");
+        assert_eq!(region_of(""), "?");
     }
 }

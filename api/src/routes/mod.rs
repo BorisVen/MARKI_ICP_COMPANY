@@ -88,6 +88,9 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/goods/batches/:id/events", post(goods::add_event))
         .route("/goods/verify/:code", get(goods::verify))
         .route("/goods/verify/:code/claim", post(goods::claim))
+        .route("/goods/verify/:code/transfer", post(goods::create_transfer).delete(goods::cancel_transfer))
+        .route("/goods/verify/:code/accept", post(goods::accept_transfer))
+        .route("/goods/batches/:id/units/:serial/flag", delete(goods::clear_flag))
         .route("/goods/mine", get(goods::my_goods))
         // Marketplace
         .route("/marketplace/buy", post(marketplace::buy_nft))
