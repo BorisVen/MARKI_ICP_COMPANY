@@ -164,6 +164,7 @@ pub async fn get_nfts(
     for n in nfts.iter_mut() {
         n.views = crate::handlers::public::nft_views(&wallet, n);
     }
+    crate::handlers::names::refresh_nfts(&state, &mut nfts).await;
     Ok(Json(nfts))
 }
 
@@ -178,6 +179,9 @@ pub async fn get_nft(
         .into_iter()
         .find(|n| n.id == nft_id)
         .ok_or_else(|| AppError::NotFound(format!("NFT {} not found", nft_id)))?;
+    let mut one = [nft];
+    crate::handlers::names::refresh_nfts(&state, &mut one).await;
+    let [nft] = one;
     Ok(Json(nft))
 }
 

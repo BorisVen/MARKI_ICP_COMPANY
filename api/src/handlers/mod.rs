@@ -5,6 +5,7 @@ pub mod cod_orders;
 pub mod deliveries;
 pub mod gifts;
 pub mod goods;
+pub mod names;
 pub mod marketplace;
 pub mod nfc;
 pub mod notifications;

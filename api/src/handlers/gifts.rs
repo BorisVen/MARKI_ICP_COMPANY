@@ -325,7 +325,10 @@ pub async fn my_gifts(
         .query("gifts", vec![QueryFilter::array_contains("claimedBy", auth.uid.clone())], None, None)
         .await
         .map_err(|e| AppError::Firebase(e.to_string()))?;
-    Ok(Json(MyGifts { sent: parse(sent), received: parse(received) }))
+    let (mut sent, mut received) = (parse(sent), parse(received));
+    crate::handlers::names::refresh_gifts(&state, &mut sent).await;
+    crate::handlers::names::refresh_gifts(&state, &mut received).await;
+    Ok(Json(MyGifts { sent, received }))
 }
 
 /// `GET /api/public/gifts/:code` — preview for the claim page (no sign-in).

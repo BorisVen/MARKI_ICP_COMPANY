@@ -222,6 +222,9 @@ async fn verified_nft(
         .unwrap_or_else(|| json!({"nfts": []}));
     let nft = find_nft(&parse_nfts(&wallet), nft_id, owner_id)
         .ok_or_else(|| AppError::NotFound("This QR is not registered by Idenity".into()))?;
+    let mut one = [nft];
+    crate::handlers::names::refresh_nfts(state, &mut one).await;
+    let [nft] = one;
     let issuer = state
         .firestore
         .get("users", nft.issuer_id())

@@ -863,6 +863,16 @@ async fn build_view(state: &Arc<AppState>, code: &str, viewer: Option<&str>, sca
         }
     }
 
+    // Owners may have renamed themselves since the handover: show current names.
+    if let Some(u) = unit.as_mut() {
+        let names = crate::handlers::names::lookup(state, u.owners.iter().map(|o| o.uid.clone()).collect()).await;
+        for o in u.owners.iter_mut() {
+            if let Some(p) = names.get(&o.uid) {
+                o.name = p.name.clone();
+            }
+        }
+    }
+
     let mut warnings = Vec::new();
     let mine = matches!((&unit, viewer), (Some(u), Some(v)) if u.owner_id.as_deref() == Some(v));
     let flag = unit.as_ref().and_then(|u| u.flag.clone());
