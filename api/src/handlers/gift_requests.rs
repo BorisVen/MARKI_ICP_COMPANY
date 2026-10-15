@@ -204,6 +204,7 @@ pub async fn approve(
         price: None,
         gift_from: Some(owner_name.clone()),
         gift_id: Some(format!("request:{}", request.id)),
+        purchase: Some(crate::models::PurchaseInfo { date: request.bought_on.clone(), place: request.bought_at.clone() }),
         ..source
     };
     save_nfts(&state, &auth.uid, &owner_wallet).await?;

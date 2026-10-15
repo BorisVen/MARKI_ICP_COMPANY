@@ -13,6 +13,7 @@ import {
   apiGetMintInfo,
   apiGetNFTs,
   apiMyGifts,
+  apiSetGiftCollection,
   apiUpdateNFT,
   type NFT,
 } from '../api';
@@ -209,6 +210,11 @@ export default function NftsPage() {
                     onDelete={() => onDelete(n.id)}
                     onShowQr={() => setQrFor(n)}
                     onGift={() => setGifting(n.batchName ? nfts.filter(x => x.batchName === n.batchName) : [n])}
+                    onMakeGift={async () => {
+                      const items = n.batchId ? nfts.filter(x => x.batchId === n.batchId) : n.batchName ? nfts.filter(x => x.batchName === n.batchName) : [n];
+                      if (!confirm(`Зробити «${n.batchName || n.title}» подарунковою колекцією (${items.length} NFT)? Вони не продаватимуться, а за QR паспорта люди зможуть запросити подарунок.`)) return;
+                      try { await apiSetGiftCollection(items.map(x => x.id), true); await reload(); } catch (e: any) { alert(e?.message ?? 'Не вдалося'); }
+                    }}
                   />
                 ))}
               </div>
@@ -301,12 +307,13 @@ function GiftCollections({ nfts, reserved, onSplit }: { nfts: NFT[]; reserved: S
   );
 }
 
-function NftCard({ nft, onEdit, onDelete, onShowQr, onGift }: {
+function NftCard({ nft, onEdit, onDelete, onShowQr, onGift, onMakeGift }: {
   nft: NFT;
   onEdit: () => void;
   onDelete: () => void;
   onShowQr: () => void;
   onGift: () => void;
+  onMakeGift?: () => void;
 }) {
   return (
     <div className="card">
@@ -356,6 +363,11 @@ function NftCard({ nft, onEdit, onDelete, onShowQr, onGift }: {
         <button className="btn" onClick={onGift} title={nft.batchName ? `Подарувати колекцію «${nft.batchName}» клієнтам` : 'Подарувати клієнту'}>
           <Icon.Gift /> Подарувати
         </button>
+        {onMakeGift && (
+          <button className="btn" onClick={onMakeGift} title="Позначити всю колекцію як подарункову: за QR паспорта люди просять подарунок">
+            🎁 Зробити подарунковою
+          </button>
+        )}
         <span className="spacer" />
         <button className="btn ghost-danger" onClick={onDelete} title="Видалити NFT"><Icon.Trash /></button>
       </div>

@@ -60,6 +60,18 @@ pub struct Nft {
     /// Minted as a gift collection: handed out through gift links, not sold.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub gift_collection: bool,
+    /// When and where the owner bought the product (from a granted gift request).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purchase: Option<PurchaseInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PurchaseInfo {
+    /// YYYY-MM-DD
+    pub date: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub place: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

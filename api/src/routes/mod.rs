@@ -51,6 +51,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // scope and can never conflate them with the dynamic /:id parameter.
         .nest("/nfts", Router::new()
             .route("/",          get(nfts::get_nfts))
+            .route("/gift-collection", post(nfts::set_gift_collection))
             .route("/",          post(nfts::create_nft)
                 .layer(DefaultBodyLimit::max(20 * 1024 * 1024)))   // 20 MB per NFT
             .route("/mint-info", get(nfts::get_mint_info))

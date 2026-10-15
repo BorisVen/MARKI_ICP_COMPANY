@@ -4,6 +4,7 @@ use axum::{
     Extension, Json,
 };
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -380,6 +381,7 @@ pub async fn create_nft(
         gift_from: None,
         gift_id: None,
         gift_collection: req.gift_collection,
+        purchase: None,
         owners: Vec::new(),
     };
 
@@ -560,6 +562,7 @@ pub async fn batch_create_nfts(
                     gift_from: None,
                     gift_id: None,
                     gift_collection: shared.gift_collection,
+                    purchase: None,
                     owners: Vec::new(),
                 };
                 nfts.push(nft);
@@ -597,6 +600,37 @@ pub async fn batch_create_nfts(
 }
 
 /// `PUT /api/nfts/:id`
+/// `POST /api/nfts/gift-collection` — mark (or unmark) NFTs as a gift collection.
+pub async fn set_gift_collection(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthenticatedUser>,
+    Json(body): Json<SetGiftCollectionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let mut nfts = load_nfts(&state, &auth.uid).await?;
+    let ids: std::collections::HashSet<&String> = body.nft_ids.iter().collect();
+    let mut changed = 0;
+    for n in nfts.iter_mut().filter(|n| ids.contains(&n.id)) {
+        if n.gift_collection != body.value {
+            n.gift_collection = body.value;
+            if body.value {
+                n.for_sale = false;
+            }
+            changed += 1;
+        }
+    }
+    if changed > 0 {
+        save_nfts(&state, &auth.uid, &nfts).await?;
+    }
+    Ok(Json(json!({ "changed": changed })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetGiftCollectionRequest {
+    pub nft_ids: Vec<String>,
+    pub value: bool,
+}
+
 pub async fn update_nft(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthenticatedUser>,
@@ -834,6 +868,7 @@ pub async fn create_edition_nfts(
         gift_from: None,
         gift_id: None,
         gift_collection: req.gift_collection,
+        purchase: None,
         owners: Vec::new(),
     };
 
