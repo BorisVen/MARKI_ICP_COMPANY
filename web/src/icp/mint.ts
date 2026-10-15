@@ -62,7 +62,9 @@ export async function mintPhotoOnChain(
 
   const after = await cycleBalance();
   return {
-    tokenIds: res.token_ids,
+    // Candid decodes vec nat64 as a BigUint64Array, whose .map() can only hold
+    // bigints: make it a plain array so callers can map ids to strings.
+    tokenIds: Array.from(res.token_ids),
     imageBytes: Number(res.image_bytes),
     cyclesSpent: before > after ? before - after : 0n,
     subscription: res.subscription,
