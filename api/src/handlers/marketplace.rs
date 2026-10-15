@@ -124,12 +124,14 @@ pub async fn buy_nft(
         owner_name: buyer_name.clone(),
         for_sale: false,
         price: None,
+        gift_collection: false,
         ..seller_nft.clone()
     };
 
     let mut buyer_nfts = load_nfts_for_user(&state, &auth.uid).await?;
     buyer_nfts.push(buyer_nft);
     save_nfts_for_user(&state, &auth.uid, &buyer_nfts).await?;
+    crate::handlers::nfts::record_move(&state, &seller_nft.id, &auth.uid, &new_nft_id).await;
 
     // ── 5. Deduct buyer's balance ─────────────────────────────────────────────
     buyer_wallet.balance -= total_cost;

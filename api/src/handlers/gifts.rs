@@ -409,6 +409,8 @@ pub async fn claim_gift(
             price: None,
             gift_from: Some(gift.owner_name.clone()),
             gift_id: Some(gift.id.clone()),
+            // Now someone's own item: nobody can ask the receiver for it as a gift.
+            gift_collection: false,
             ..source
         });
         gift.claims.push(GiftClaim {
@@ -426,6 +428,9 @@ pub async fn claim_gift(
     let mut my_wallet = load_nfts(&state, &auth.uid).await?;
     my_wallet.extend(received_all.iter().cloned());
     save_nfts(&state, &auth.uid, &my_wallet).await?;
+    for c in gift.claims.iter().filter(|c| received_all.iter().any(|n| n.id == c.nft_id)) {
+        crate::handlers::nfts::record_move(&state, &c.source_nft_id, &auth.uid, &c.nft_id).await;
+    }
 
     gift.claimed_by.push(auth.uid.clone());
     if gift.remaining_nft_ids.is_empty() {

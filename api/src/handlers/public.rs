@@ -248,18 +248,38 @@ pub struct PublicPassport {
     #[serde(flatten)]
     verification: VerifyNftResponse,
     owner_name: String,
+    /// Set when the QR's NFT has moved: where it is now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moved_to: Option<MovedTo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MovedTo {
+    owner_id: String,
+    nft_id: String,
 }
 
 pub async fn get_passport(
     State(state): State<Arc<AppState>>,
     Path((owner_id, nft_id)): Path<(String, String)>,
 ) -> ApiResult<Json<PublicPassport>> {
+    // An old QR may point at an NFT that has since been given or sold: follow it.
+    let (owner_id, nft_id, moved) = match verified_nft(&state, &owner_id, &nft_id).await {
+        Ok(_) => (owner_id, nft_id, false),
+        Err(AppError::NotFound(msg)) => match crate::handlers::nfts::current_location(&state, &owner_id, &nft_id).await {
+            Some((o, n)) => (o, n, true),
+            None => return Err(AppError::NotFound(msg)),
+        },
+        Err(e) => return Err(e),
+    };
     let verification = verified_nft(&state, &owner_id, &nft_id).await?;
     let owner_name = state.firestore.get("users", &owner_id).await
         .map_err(|e| AppError::Firebase(e.to_string()))?
         .and_then(|u| u.get("name").and_then(Value::as_str).map(str::to_owned))
         .unwrap_or(verification.nft.owner_name.clone());
     Ok(Json(PublicPassport {
+        moved_to: moved.then(|| MovedTo { owner_id: owner_id.clone(), nft_id: nft_id.clone() }),
         verification,
         owner_name,
     }))

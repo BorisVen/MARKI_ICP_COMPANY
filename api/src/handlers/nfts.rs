@@ -109,6 +109,61 @@ pub(crate) async fn save_nfts(state: &AppState, uid: &str, nfts: &[Nft]) -> ApiR
     Ok(())
 }
 
+// A transfer gives the NFT a new id in the new owner's wallet. Printed QR codes
+// still carry the old one, so every move is remembered in `nft_moves/{old id}`
+// and a passport lookup follows the trail to wherever the NFT is now.
+const NFT_MOVES: &str = "nft_moves";
+
+/// Remembers that NFT `old_id` now lives in `new_owner`'s wallet as `new_id`.
+pub(crate) async fn record_move(state: &AppState, old_id: &str, new_owner: &str, new_id: &str) {
+    let doc = json!({ "ownerId": new_owner, "nftId": new_id, "at": Utc::now().to_rfc3339() });
+    if let Err(e) = state.firestore.set(NFT_MOVES, old_id, &doc).await {
+        tracing::warn!(error = %e, old_id, "Failed to record an NFT move");
+    }
+}
+
+/// Where NFT `nft_id` (once owned by `owner_id`) is now: follows recorded moves.
+pub(crate) async fn current_location(state: &AppState, owner_id: &str, nft_id: &str) -> Option<(String, String)> {
+    let (mut owner, mut id) = (owner_id.to_owned(), nft_id.to_owned());
+    let mut moved = false;
+    for _ in 0..20 {
+        let next = match state.firestore.get(NFT_MOVES, &id).await.ok().flatten() {
+            Some(m) => match (m.get("ownerId").and_then(Value::as_str), m.get("nftId").and_then(Value::as_str)) {
+                (Some(o), Some(n)) => Some((o.to_owned(), n.to_owned())),
+                _ => None,
+            },
+            None => legacy_move(state, &owner, &id).await,
+        };
+        let Some((o, n)) = next else { break };
+        (owner, id, moved) = (o, n, true);
+    }
+    moved.then_some((owner, id))
+}
+
+/// Moves made before `nft_moves` existed, rebuilt from gift claims and granted
+/// gift requests of the previous owner.
+async fn legacy_move(state: &AppState, owner_id: &str, nft_id: &str) -> Option<(String, String)> {
+    use crate::services::firestore::QueryFilter;
+    let requests = state.firestore
+        .query("gift_requests", vec![QueryFilter::equal("nftId", nft_id.to_owned())], None, None)
+        .await.ok().unwrap_or_default();
+    for r in requests {
+        if r.get("status").and_then(Value::as_str) == Some("approved") {
+            if let (Some(o), Some(n)) = (r.get("requesterId").and_then(Value::as_str), r.get("givenNftId").and_then(Value::as_str)) {
+                return Some((o.to_owned(), n.to_owned()));
+            }
+        }
+    }
+    let gifts = state.firestore
+        .query("gifts", vec![QueryFilter::equal("ownerId", owner_id.to_owned())], None, None)
+        .await.ok().unwrap_or_default();
+    gifts.iter()
+        .filter_map(|g| g.get("claims").and_then(Value::as_array))
+        .flatten()
+        .find(|c| c.get("sourceNftId").and_then(Value::as_str) == Some(nft_id))
+        .and_then(|c| Some((c.get("uid")?.as_str()?.to_owned(), c.get("nftId")?.as_str()?.to_owned())))
+}
+
 /// Viewer link encoded into an NFT's QR code.
 fn viewer_url(state: &AppState, nft_id: &str) -> String {
     let base = &state.config.qr_base_url;
@@ -1220,6 +1275,7 @@ pub async fn transfer_nft(
 
     // Build the new record with updated ownership.
     let new_id = Uuid::new_v4().to_string();
+    let old_id = seller_nft.id.clone();
     let owners = seller_nft.owners_with(buyer_uid, &buyer_name, buyer_doc.as_ref().and_then(|d| d.get("username")).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_owned), "sale", &Utc::now().to_rfc3339());
     let transferred = Nft {
         owners,
@@ -1228,6 +1284,7 @@ pub async fn transfer_nft(
         owner_name: buyer_name,
         for_sale:   false,
         price:      None,
+        gift_collection: false,
         ..seller_nft
     };
 
@@ -1235,6 +1292,7 @@ pub async fn transfer_nft(
     let mut buyer_nfts = load_nfts(&state, buyer_uid).await?;
     buyer_nfts.push(transferred);
     save_nfts(&state, buyer_uid, &buyer_nfts).await?;
+    record_move(&state, &old_id, buyer_uid, &new_id).await;
 
     // ── d) Remove the purchased item from the listing. Collection posts stay
     // live until their final edition is sold.

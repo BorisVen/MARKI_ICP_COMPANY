@@ -205,12 +205,15 @@ pub async fn approve(
         gift_from: Some(owner_name.clone()),
         gift_id: Some(format!("request:{}", request.id)),
         purchase: Some(crate::models::PurchaseInfo { date: request.bought_on.clone(), place: request.bought_at.clone() }),
+        // Now the requester's own item: nobody can ask them for it as a gift.
+        gift_collection: false,
         ..source
     };
     save_nfts(&state, &auth.uid, &owner_wallet).await?;
     let mut their_wallet = load_nfts(&state, &request.requester_id).await?;
     their_wallet.push(given);
     save_nfts(&state, &request.requester_id, &their_wallet).await?;
+    crate::handlers::nfts::record_move(&state, &request.nft_id, &request.requester_id, &new_id).await;
 
     request.status = "approved".into();
     request.decided_at = Some(now.clone());
