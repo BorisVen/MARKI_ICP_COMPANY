@@ -1,5 +1,6 @@
 pub mod firestore;
 pub mod google_auth;
+pub mod icp;
 pub mod solana;
 pub mod storage;
 

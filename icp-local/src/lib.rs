@@ -99,6 +99,9 @@ struct Settings {
     /// ICRC-7 transfer transaction index. Defaulted for state saved before transfers.
     #[serde(default)]
     next_transfer: u64,
+    /// Marki's server key: holds tokens for users without their own wallet.
+    #[serde(default)]
+    custodian: Option<Principal>,
 }
 
 impl Default for Settings {
@@ -113,6 +116,7 @@ impl Default for Settings {
             next_image: 0,
             image_bytes: 0,
             next_transfer: 0,
+            custodian: None,
         }
     }
 }
@@ -185,8 +189,22 @@ fn update_settings<R>(f: impl FnOnce(&mut Settings) -> R) -> R {
     })
 }
 
-fn owner_key(owner: &Principal, token: u64) -> String {
-    format!("{}#{:020}", owner.to_text(), token)
+/// Index key "<principal>[.<subaccount hex>]#<token>": a principal's default
+/// account keeps the original format, sub-accounts (Marki custody) get a suffix.
+fn owner_key(owner: &Account, token: u64) -> String {
+    format!("{}#{:020}", account_prefix(owner), token)
+}
+
+fn account_prefix(acc: &Account) -> String {
+    match sub_of(acc) {
+        Some(sub) => format!("{}.{}", acc.owner.to_text(), hex::encode(sub)),
+        None => acc.owner.to_text(),
+    }
+}
+
+/// A sub-account of all zeros is the default account.
+fn sub_of(acc: &Account) -> Option<[u8; 32]> {
+    acc.subaccount.filter(|s| s.iter().any(|b| *b != 0))
 }
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -219,6 +237,8 @@ struct Config {
     ledger: Principal,
     ledger_fee_e8s: u64,
     platform_fee_bps: u16,
+    /// Principal of Marki's custody key (tokens of users without a wallet).
+    custodian: Option<Principal>,
 }
 
 #[derive(CandidType, Deserialize, Default)]
@@ -473,7 +493,7 @@ fn receipts() -> Vec<Receipt> {
 #[query]
 fn config() -> Config {
     let s = settings();
-    Config { ledger: s.ledger, ledger_fee_e8s: s.ledger_fee_e8s, platform_fee_bps: PLATFORM_FEE_BPS }
+    Config { ledger: s.ledger, ledger_fee_e8s: s.ledger_fee_e8s, platform_fee_bps: PLATFORM_FEE_BPS, custodian: s.custodian }
 }
 
 async fn ledger_balance() -> Result<Nat, String> {
@@ -826,6 +846,14 @@ async fn buy_plan(plan_id: String, max_price_e8s: u64) -> Result<Subscription, S
     Ok(sub)
 }
 
+/// Controller only: set the principal of Marki's custody key.
+#[update]
+fn set_custodian(custodian: Principal) -> Result<(), String> {
+    require_controller()?;
+    update_settings(|s| s.custodian = Some(custodian));
+    Ok(())
+}
+
 /// Controller only: credit mints without a purchase (tests, demos, promotions).
 /// Keeps the plan valid for at least `min_days` and allows photos up to 2 MB.
 #[update]
@@ -909,6 +937,9 @@ const MAX_COPIES: u32 = 1_000;
 #[derive(CandidType, Serialize, Deserialize, Clone)]
 struct Token {
     owner: Principal,
+    /// Sub-account of the owner (Marki custody keeps one per Marki user).
+    #[serde(default)]
+    owner_sub: Option<Vec<u8>>,
     metadata: String,
     image_id: Option<u64>,
     minted_at_ns: u64,
@@ -956,7 +987,12 @@ fn check_metadata(metadata: &str) -> Result<(), String> {
 }
 
 /// `numbered`: the tokens are copies of one edition and get "i of n" on-chain.
-fn insert_tokens(owner: Principal, metadata: Vec<String>, image_id: Option<u64>, now: u64, numbered: bool) -> Vec<u64> {
+fn token_account(t: &Token) -> Account {
+    let subaccount = t.owner_sub.as_ref().and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok());
+    Account { owner: t.owner, subaccount }
+}
+
+fn insert_tokens(owner: Account, metadata: Vec<String>, image_id: Option<u64>, now: u64, numbered: bool) -> Vec<u64> {
     let total = metadata.len() as u32;
     let numbered = numbered && total > 1;
     let first = update_settings(|s| {
@@ -970,7 +1006,8 @@ fn insert_tokens(owner: Principal, metadata: Vec<String>, image_id: Option<u64>,
         .map(|(i, metadata)| {
             let id = first + i as u64;
             let token = Token {
-                owner,
+                owner: owner.owner,
+                owner_sub: sub_of(&owner).map(|s| s.to_vec()),
                 metadata,
                 image_id,
                 minted_at_ns: now,
@@ -1024,7 +1061,21 @@ fn append_chunk(upload_id: u64, chunk: serde_bytes::ByteBuf) -> Result<u64, Stri
 
 #[update]
 fn mint_uploaded(upload_id: u64, metadata: String, copies: u32) -> Result<MintResult, String> {
+    mint_upload(upload_id, metadata, copies, None)
+}
+
+/// Same as `mint_uploaded`, but the tokens go to `to` (e.g. the brand's Marki
+/// custody account) while the caller's plan pays for them.
+#[update]
+fn mint_uploaded_to(upload_id: u64, metadata: String, copies: u32, to: Option<Account>) -> Result<MintResult, String> {
+    mint_upload(upload_id, metadata, copies, to)
+}
+
+fn mint_upload(upload_id: u64, metadata: String, copies: u32, to: Option<Account>) -> Result<MintResult, String> {
     let owner = caller_not_anonymous()?;
+    if to.as_ref().is_some_and(|a| a.owner == Principal::anonymous()) {
+        return Err("tokens can't go to the anonymous principal".into());
+    }
     check_metadata(&metadata)?;
     if copies == 0 || copies > MAX_COPIES {
         return Err(format!("copies must be 1..={MAX_COPIES}"));
@@ -1052,7 +1103,8 @@ fn mint_uploaded(upload_id: u64, metadata: String, copies: u32) -> Result<MintRe
     IMAGES.with(|m| m.borrow_mut().insert(image_id, Image(bytes)));
 
     let now = ic_cdk::api::time();
-    let token_ids = insert_tokens(owner, vec![metadata; copies as usize], Some(image_id), now, true);
+    let holder = to.unwrap_or_else(|| account(owner));
+    let token_ids = insert_tokens(holder, vec![metadata; copies as usize], Some(image_id), now, true);
     Ok(MintResult { token_ids, image_bytes: size, subscription })
 }
 
@@ -1067,7 +1119,7 @@ fn mint_metadata(items: Vec<String>) -> Result<MintResult, String> {
         check_metadata(m)?;
     }
     let subscription = spend_credits(owner, UsageKind::Metadata, items.len() as u64, 0)?;
-    let token_ids = insert_tokens(owner, items, None, ic_cdk::api::time(), false);
+    let token_ids = insert_tokens(account(owner), items, None, ic_cdk::api::time(), false);
     Ok(MintResult { token_ids, image_bytes: 0, subscription })
 }
 
@@ -1095,7 +1147,7 @@ fn icrc7_owner_of(ids: Vec<Nat>) -> Vec<Option<Account>> {
     TOKENS.with(|m| {
         let m = m.borrow();
         ids.iter()
-            .map(|id| nat_to_u64(id).and_then(|id| m.get(&id)).map(|t| account(t.owner)))
+            .map(|id| nat_to_u64(id).and_then(|id| m.get(&id)).map(|t| token_account(&t)))
             .collect()
     })
 }
@@ -1103,15 +1155,12 @@ fn icrc7_owner_of(ids: Vec<Nat>) -> Vec<Option<Account>> {
 /// Token ids of `acc`, ascending, after `prev`, at most `take` (default 100, max 1000).
 #[query]
 fn icrc7_tokens_of(acc: Account, prev: Option<Nat>, take: Option<Nat>) -> Vec<Nat> {
-    if acc.subaccount.is_some() {
-        return vec![];
-    }
     let start = prev.as_ref().and_then(nat_to_u64).map(|p| p + 1).unwrap_or(0);
     let take = take.as_ref().and_then(nat_to_u64).unwrap_or(100).min(1000) as usize;
-    let prefix = format!("{}#", acc.owner.to_text());
+    let prefix = format!("{}#", account_prefix(&acc));
     OWNER_TOKENS.with(|m| {
         m.borrow()
-            .range(owner_key(&acc.owner, start)..)
+            .range(owner_key(&acc, start)..)
             .map(|e| e.key().clone())
             .take_while(|k| k.starts_with(&prefix))
             .take(take)
@@ -1165,21 +1214,23 @@ enum Icrc7TransferError {
 }
 
 /// Moves one token from `from` to `to`; the caller must own it.
-fn transfer_token(from: Principal, to: &Account, token_id: &Nat) -> Result<Nat, Icrc7TransferError> {
+fn transfer_token(from: &Account, to: &Account, token_id: &Nat) -> Result<Nat, Icrc7TransferError> {
     let id = nat_to_u64(token_id).ok_or(Icrc7TransferError::NonExistingTokenId)?;
     let mut token = TOKENS.with(|m| m.borrow().get(&id)).ok_or(Icrc7TransferError::NonExistingTokenId)?;
-    if token.owner != from {
+    let holder = token_account(&token);
+    if holder.owner != from.owner || sub_of(&holder) != sub_of(from) {
         return Err(Icrc7TransferError::Unauthorized);
     }
-    if to.owner == Principal::anonymous() || to.owner == from {
+    if to.owner == Principal::anonymous() || (to.owner == from.owner && sub_of(to) == sub_of(from)) {
         return Err(Icrc7TransferError::InvalidRecipient);
     }
     OWNER_TOKENS.with(|m| {
         let mut m = m.borrow_mut();
-        m.remove(&owner_key(&from, id));
-        m.insert(owner_key(&to.owner, id), ());
+        m.remove(&owner_key(from, id));
+        m.insert(owner_key(to, id), ());
     });
     token.owner = to.owner;
+    token.owner_sub = sub_of(to).map(|s| s.to_vec());
     TOKENS.with(|m| m.borrow_mut().insert(id, token));
     Ok(Nat::from(update_settings(|s| {
         let tx = s.next_transfer;
@@ -1198,7 +1249,12 @@ fn icrc7_transfer(args: Vec<Icrc7TransferArg>) -> Vec<Option<Result<Nat, Icrc7Tr
         };
         return args.iter().map(|_| Some(Err(err.clone_generic()))).collect();
     }
-    args.iter().map(|a| Some(transfer_token(caller, &a.to, &a.token_id))).collect()
+    args.iter()
+        .map(|a| {
+            let sub = a.from_subaccount.as_ref().and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok());
+            Some(transfer_token(&Account { owner: caller, subaccount: sub }, &a.to, &a.token_id))
+        })
+        .collect()
 }
 
 impl Icrc7TransferError {
@@ -1327,23 +1383,46 @@ mod tests {
     fn owner_transfers_a_token_and_others_cannot() {
         let a = Principal::from_slice(&[1; 29]);
         let b = Principal::from_slice(&[2; 29]);
-        let ids = insert_tokens(a, vec!["{}".into()], None, 1, false);
+        let acc = |p: Principal| Account { owner: p, subaccount: None };
+        let ids = insert_tokens(acc(a), vec!["{}".into()], None, 1, false);
         let id = Nat::from(ids[0]);
-        let to_b = Account { owner: b, subaccount: None };
         // Someone else can't move it; nor can the owner send it to themselves.
-        assert_eq!(transfer_token(b, &to_b, &id), Err(Icrc7TransferError::Unauthorized));
-        assert_eq!(transfer_token(a, &Account { owner: a, subaccount: None }, &id), Err(Icrc7TransferError::InvalidRecipient));
-        assert!(transfer_token(a, &to_b, &id).is_ok());
+        assert_eq!(transfer_token(&acc(b), &acc(b), &id), Err(Icrc7TransferError::Unauthorized));
+        assert_eq!(transfer_token(&acc(a), &acc(a), &id), Err(Icrc7TransferError::InvalidRecipient));
+        assert!(transfer_token(&acc(a), &acc(b), &id).is_ok());
         assert_eq!(TOKENS.with(|m| m.borrow().get(&ids[0])).unwrap().owner, b);
-        assert!(OWNER_TOKENS.with(|m| m.borrow().contains_key(&owner_key(&b, ids[0]))));
-        assert!(!OWNER_TOKENS.with(|m| m.borrow().contains_key(&owner_key(&a, ids[0]))));
-        assert_eq!(transfer_token(a, &to_b, &Nat::from(999_999u64)), Err(Icrc7TransferError::NonExistingTokenId));
+        assert!(OWNER_TOKENS.with(|m| m.borrow().contains_key(&owner_key(&acc(b), ids[0]))));
+        assert!(!OWNER_TOKENS.with(|m| m.borrow().contains_key(&owner_key(&acc(a), ids[0]))));
+        assert_eq!(transfer_token(&acc(a), &acc(b), &Nat::from(999_999u64)), Err(Icrc7TransferError::NonExistingTokenId));
+    }
+
+    #[test]
+    fn custody_sub_accounts_hold_and_move_tokens() {
+        let custody = Principal::from_slice(&[7; 29]);
+        let brand = Account { owner: custody, subaccount: Some([1; 32]) };
+        let buyer = Account { owner: custody, subaccount: Some([2; 32]) };
+        let ids = insert_tokens(brand, vec!["{}".into(), "{}".into()], None, 1, true);
+        // The custody key moves a token between users' sub-accounts.
+        assert!(transfer_token(&brand, &buyer, &Nat::from(ids[0])).is_ok());
+        assert_eq!(token_account(&TOKENS.with(|m| m.borrow().get(&ids[0])).unwrap()), buyer);
+        // The wrong sub-account can't move the brand's other token.
+        assert_eq!(transfer_token(&buyer, &brand, &Nat::from(ids[1])), Err(Icrc7TransferError::Unauthorized));
+        let listed = |a: Account| icrc7_tokens_of(a, None, None);
+        assert_eq!(listed(buyer), vec![Nat::from(ids[0])]);
+        assert_eq!(listed(brand), vec![Nat::from(ids[1])]);
+        // A withdrawal to a personal wallet lands in its default account.
+        let wallet = Account { owner: Principal::from_slice(&[9; 29]), subaccount: None };
+        assert!(transfer_token(&buyer, &wallet, &Nat::from(ids[0])).is_ok());
+        assert_eq!(listed(wallet), vec![Nat::from(ids[0])]);
     }
 
     #[test]
     fn owner_keys_sort_by_token_id() {
-        let p = Principal::from_text("2vxsx-fae").unwrap();
+        let p = Account { owner: Principal::from_text("2vxsx-fae").unwrap(), subaccount: None };
         assert!(owner_key(&p, 9) < owner_key(&p, 10));
-        assert!(owner_key(&p, 10).starts_with(&format!("{}#", p.to_text())));
+        // The default account keeps the key format stored before sub-accounts.
+        assert!(owner_key(&p, 10).starts_with(&format!("{}#", p.owner.to_text())));
+        let zero = Account { subaccount: Some([0; 32]), ..p };
+        assert_eq!(owner_key(&zero, 3), owner_key(&p, 3));
     }
 }

@@ -662,3 +662,6 @@ export type PendingOnchain = {
 };
 /** NFTs I gave away whose tokens may still sit in my wallet. */
 export const apiOnchainPending = () => get<PendingOnchain[]>('/api/onchain/pending');
+/** Move my tokens from Marki custody to my own wallet (all on-chain NFTs when `nftIds` is empty). */
+export const apiWithdrawOnchain = (principal: string, nftIds: string[] = []) =>
+  post<{ moved: number; total: number }>('/api/onchain/withdraw', { principal, nftIds });

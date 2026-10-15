@@ -135,3 +135,81 @@ mod tests {
         assert!(!looks_like_principal("pztgf--ur626"));
     }
 }
+
+// ── Marki custody ───────────────────────────────────────────────────────────
+
+/// Moves the tokens of NFTs just gifted from the sender's custody sub-account to
+/// the receiver's, in the background. Tokens held elsewhere (e.g. a brand's own
+/// Plug) are left for the sender to hand over from their wallet.
+pub fn spawn_custody_move(from_uid: String, to_uid: String, mint_addresses: Vec<String>) {
+    tokio::spawn(async move {
+        let Some(c) = crate::services::icp::custody().await else { return };
+        let ids: Vec<u64> = mint_addresses.iter().filter_map(|m| crate::services::icp::token_of(m, &c.canister())).collect();
+        if ids.is_empty() {
+            return;
+        }
+        match c.transfer(&from_uid, &c.account_of(&to_uid), &ids).await {
+            Ok(res) => {
+                let moved = res.iter().filter(|r| r.is_ok()).count();
+                tracing::info!(moved, total = ids.len(), "custody move for a gift");
+            }
+            Err(e) => tracing::warn!(error = %e, "custody move failed"),
+        }
+    });
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustodyAccount {
+    pub custodian: String,
+    /// Hex of the caller's 32-byte custody sub-account.
+    pub subaccount: String,
+}
+
+/// `GET /api/onchain/account` — where the caller's tokens live in Marki custody.
+pub async fn account(Extension(auth): Extension<AuthenticatedUser>) -> ApiResult<Json<CustodyAccount>> {
+    let c = crate::services::icp::custody().await.ok_or_else(|| AppError::NotFound("Marki custody is off".into()))?;
+    Ok(Json(CustodyAccount {
+        custodian: c.custodian.to_text(),
+        subaccount: hex::encode(crate::services::icp::user_subaccount(&auth.uid)),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WithdrawRequest {
+    /// The user's own wallet (Internet Identity or Plug).
+    pub principal: String,
+    /// NFTs to withdraw; all of the caller's on-chain NFTs when empty.
+    #[serde(default)]
+    pub nft_ids: Vec<String>,
+}
+
+/// `POST /api/onchain/withdraw` — move my tokens from Marki custody to my wallet.
+pub async fn withdraw(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthenticatedUser>,
+    Json(req): Json<WithdrawRequest>,
+) -> ApiResult<Json<Value>> {
+    let c = crate::services::icp::custody().await.ok_or_else(|| AppError::BadRequest("Сховище Marki вимкнене".into()))?;
+    let to = candid::Principal::from_text(req.principal.trim())
+        .map_err(|_| AppError::BadRequest("Це не схоже на principal гаманця".into()))?;
+    if to == candid::Principal::anonymous() || to == c.custodian {
+        return Err(AppError::BadRequest("Неправильний гаманець".into()));
+    }
+    let nfts = load_nfts(&state, &auth.uid).await?;
+    let ids: Vec<u64> = nfts
+        .iter()
+        .filter(|n| req.nft_ids.is_empty() || req.nft_ids.contains(&n.id))
+        .filter_map(|n| n.mint_address.as_deref().and_then(|m| crate::services::icp::token_of(m, &c.canister())))
+        .collect();
+    if ids.is_empty() {
+        return Ok(Json(json!({ "moved": 0, "total": 0 })));
+    }
+    let res = c
+        .transfer(&auth.uid, &crate::services::icp::Account { owner: to, subaccount: None }, &ids)
+        .await
+        .map_err(|e| AppError::Internal(e))?;
+    let moved = res.iter().filter(|r| r.is_ok()).count();
+    Ok(Json(json!({ "moved": moved, "total": ids.len() })))
+}

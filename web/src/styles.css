@@ -1852,3 +1852,4 @@ details.soft[open] summary { margin-bottom: 10px; }
 .onchain-card .oc-title { font-weight: 600; font-size: 15px; }
 .onchain-list { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; max-height: 220px; overflow-y: auto; font-size: 13px; }
 .onchain-list > div { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.onchain-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }

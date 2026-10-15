@@ -34,6 +34,7 @@ import {
   parseIcpMintAddress,
   type OnChainMint,
 } from '../icp/mint';
+import { custodyAccount } from '../icp/custody';
 
 const CATEGORIES = ['Art', 'Music', 'Photography', 'Gaming', '3D', 'Collectible', 'Sports', 'Meme'];
 const CURRENCIES = ['ICP', 'UAH', 'USD', 'USDC'];
@@ -381,6 +382,7 @@ function NftCard({ nft, onEdit, onDelete, onShowQr, onGift, onMakeGift }: {
 
 function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
   const wallet = useWallet();
+  const { user } = useAuth();
   const walletReady = !!wallet;
   const principal = wallet?.principal ?? '';
   const [chainMint, setChainMint] = useState<OnChainMint | null>(null);
@@ -509,6 +511,8 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
         giftCollection,
       };
       if (forSale && price) baseMetadata.price = parseFloat(price);
+      // Tokens go to the brand's Marki custody account, so gifts move on-chain by themselves.
+      const custody = ICP_MINT_ENABLED && user ? await custodyAccount(user.uid) : null;
 
       if (isCollection) {
         const totalItems = collectionFiles.length;
@@ -525,7 +529,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
         if (ICP_MINT_ENABLED) {
           for (let i = 0; i < compressedFiles.length; i++) {
             mints.push(await mintPhotoOnChain(wallet, compressedFiles[i], { ...baseMetadata, ...items[i] }, 1,
-              t => setUploadProgress(`ICP ${i + 1}/${totalItems} — ${t}`)));
+              t => setUploadProgress(`ICP ${i + 1}/${totalItems} — ${t}`), custody));
           }
           setChainMint(mergeMints(mints));
         }
@@ -572,7 +576,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
           setUploadProgress('Крок 1/3 — Стиснення та завантаження зображення…');
           const editionImage = await compressImage(selectedFile!);
           const edMint = ICP_MINT_ENABLED
-            ? await mintPhotoOnChain(wallet, editionImage, baseMetadata, numEditions, setUploadProgress)
+            ? await mintPhotoOnChain(wallet, editionImage, baseMetadata, numEditions, setUploadProgress, custody)
             : null;
           setChainMint(edMint);
           const editionForm = new FormData();
@@ -607,7 +611,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
           setUploadProgress('Крок 1/3 — Стиснення та завантаження…');
           const image = await compressImage(selectedFile!);
           const oneMint = ICP_MINT_ENABLED
-            ? await mintPhotoOnChain(wallet, image, baseMetadata, 1, setUploadProgress)
+            ? await mintPhotoOnChain(wallet, image, baseMetadata, 1, setUploadProgress, custody)
             : null;
           setChainMint(oneMint);
           const form = new FormData();

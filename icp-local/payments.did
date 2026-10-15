@@ -21,6 +21,7 @@ type Config = record {
   ledger : principal;
   ledger_fee_e8s : nat64;
   platform_fee_bps : nat16;
+  custodian : opt principal;
 };
 type BuyResult = variant { Ok : Receipt; Err : text };
 type MintKind = variant { Photo; Metadata; MetadataBatch };
@@ -80,6 +81,7 @@ type UsageKind = variant { Photo; Metadata };
 type Account = record { owner : principal; subaccount : opt blob };
 type Token = record {
   owner : principal;
+  owner_sub : opt blob;
   metadata : text;
   image_id : opt nat64;
   minted_at_ns : nat64;
@@ -140,6 +142,8 @@ service : (opt InitArg) -> {
   plans : () -> (variant { Ok : vec PlanQuote; Err : text }) query;
   set_plans : (vec Plan) -> (variant { Ok; Err : text });
   buy_plan : (text, nat64) -> (variant { Ok : Subscription; Err : text });
+  set_custodian : (principal) -> (variant { Ok; Err : text });
+  mint_uploaded_to : (nat64, text, nat32, opt Account) -> (variant { Ok : MintResult; Err : text });
   grant_credits : (principal, nat64, nat64, nat32) -> (variant { Ok : Subscription; Err : text });
   subscription_of : (principal) -> (opt Subscription) query;
   purchases_of : (principal) -> (vec PlanPurchase) query;

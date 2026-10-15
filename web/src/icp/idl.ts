@@ -131,6 +131,8 @@ export interface PaymentsService {
   purchases_of: (owner: Principal) => Promise<PlanPurchase[]>;
   pricing: () => Promise<Pricing>;
   icrc7_owner_of: (ids: bigint[]) => Promise<([] | [Account])[]>;
+  mint_uploaded_to: (uploadId: bigint, metadata: string, copies: number, to: [] | [Account]) => Promise<Res<MintResult>>;
+  config: () => Promise<{ ledger: Principal; ledger_fee_e8s: bigint; platform_fee_bps: number; custodian: [] | [Principal] }>;
   icrc7_transfer: (args: Icrc7TransferArg[]) => Promise<([] | [{ Ok: bigint } | { Err: Icrc7TransferError }])[]>;
 }
 
@@ -217,6 +219,10 @@ export const paymentsIdl: IDLType.InterfaceFactory = ({ IDL }) => {
   });
   return IDL.Service({
     icrc7_owner_of: IDL.Func([IDL.Vec(IDL.Nat)], [IDL.Vec(IDL.Opt(Account7))], ['query']),
+    mint_uploaded_to: IDL.Func([IDL.Nat64, IDL.Text, IDL.Nat32, IDL.Opt(Account7)], [res(MintResult)], []),
+    config: IDL.Func([], [IDL.Record({
+      ledger: IDL.Principal, ledger_fee_e8s: IDL.Nat64, platform_fee_bps: IDL.Nat16, custodian: IDL.Opt(IDL.Principal),
+    })], ['query']),
     icrc7_transfer: IDL.Func([IDL.Vec(TransferArg7)], [IDL.Vec(IDL.Opt(IDL.Variant({ Ok: IDL.Nat, Err: TransferError7 })))], []),
     create_upload: IDL.Func([], [res(IDL.Nat64)], []),
     append_chunk: IDL.Func([IDL.Nat64, IDL.Vec(IDL.Nat8)], [res(IDL.Nat64)], []),

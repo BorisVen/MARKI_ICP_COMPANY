@@ -83,6 +83,8 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/gifts/split", post(gifts::create_gift_group))
         .route("/me/icp-principal", put(onchain::link_principal))
         .route("/onchain/pending", get(onchain::pending))
+        .route("/onchain/account", get(onchain::account))
+        .route("/onchain/withdraw", post(onchain::withdraw))
         .route("/gift-requests", get(gift_requests::mine).post(gift_requests::create))
         .route("/gift-requests/:id/approve", post(gift_requests::approve))
         .route("/gift-requests/:id/decline", post(gift_requests::decline))

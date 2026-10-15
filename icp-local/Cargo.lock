@@ -537,6 +537,7 @@ version = "0.1.0"
 dependencies = [
  "candid",
  "ciborium",
+ "hex",
  "ic-cdk",
  "ic-stable-structures 0.7.2",
  "icrc-ledger-types",

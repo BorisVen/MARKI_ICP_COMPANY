@@ -1,4 +1,4 @@
-import { paymentsIdl, type PaymentsService, type Subscription } from './idl';
+import { paymentsIdl, type Account, type PaymentsService, type Subscription } from './idl';
 import { anonymousActor, PAYMENTS_CANISTER_ID, type Wallet } from './wallet';
 
 /** On-chain minting is on when the payments/NFT canister is configured. */
@@ -47,6 +47,8 @@ export async function mintPhotoOnChain(
   metadata: Record<string, unknown>,
   copies = 1,
   onProgress?: (text: string) => void,
+  /** Where the tokens go (Marki custody); the minting wallet when omitted. */
+  to?: Account | null,
 ): Promise<OnChainMint> {
   const payments = await wallet.actor<PaymentsService>(PAYMENTS_CANISTER_ID, paymentsIdl);
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -58,7 +60,9 @@ export async function mintPhotoOnChain(
     unwrap(await payments.append_chunk(uploadId, bytes.subarray(off, off + CHUNK_BYTES)));
   }
   onProgress?.(copies > 1 ? `Мінт ${copies} editions у ICP…` : 'Мінт у ICP…');
-  const res = unwrap(await payments.mint_uploaded(uploadId, JSON.stringify(metadata), copies));
+  const res = unwrap(to
+    ? await payments.mint_uploaded_to(uploadId, JSON.stringify(metadata), copies, [to])
+    : await payments.mint_uploaded(uploadId, JSON.stringify(metadata), copies));
 
   const after = await cycleBalance();
   return {

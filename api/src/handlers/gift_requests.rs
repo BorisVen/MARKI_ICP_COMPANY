@@ -195,6 +195,7 @@ pub async fn approve(
     let now = Utc::now().to_rfc3339();
     let username = (!request.requester_username.is_empty()).then(|| request.requester_username.clone());
     let new_id = Uuid::new_v4().to_string();
+    let mint = source.mint_address.clone();
     let given = crate::models::Nft {
         owners: source.owners_with(&request.requester_id, &request.requester_name, username, "gift", &now),
         id: new_id.clone(),
@@ -214,6 +215,7 @@ pub async fn approve(
     their_wallet.push(given);
     save_nfts(&state, &request.requester_id, &their_wallet).await?;
     crate::handlers::nfts::record_move(&state, &request.nft_id, &request.requester_id, &new_id).await;
+    crate::handlers::onchain::spawn_custody_move(auth.uid.clone(), request.requester_id.clone(), mint.into_iter().collect());
 
     request.status = "approved".into();
     request.decided_at = Some(now.clone());
