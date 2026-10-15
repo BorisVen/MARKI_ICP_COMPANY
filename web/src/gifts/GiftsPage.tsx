@@ -5,6 +5,7 @@ import { fmtAgo, fmtDateTime } from '../format';
 import { Icon } from '../icons';
 import { ListSkeleton } from '../Skeleton';
 import { GiftShare } from './CreateGiftModal';
+import { printGiftQrs } from './printGifts';
 
 const STATUS: Record<Gift['status'], { label: string; tone: string }> = {
   active: { label: 'Активний', tone: 'badge-info' },
@@ -67,9 +68,11 @@ export default function GiftsPage({ hint }: { hint?: string }) {
         />
       ) : (
         <div className="order-list">
-          {list.map(g => tab === 'sent'
-            ? <SentGift key={g.id} gift={g} onShare={() => setSharing(g)} onCancel={() => cancel(g)} />
-            : <ReceivedGift key={g.id} gift={g} />)}
+          {tab === 'sent'
+            ? groupSent(list).map(item => Array.isArray(item)
+              ? <GiftGroup key={item[0].groupId} gifts={item} onShare={setSharing} onCancel={cancel} />
+              : <SentGift key={item.id} gift={item} onShare={() => setSharing(item)} onCancel={() => cancel(item)} />)
+            : list.map(g => <ReceivedGift key={g.id} gift={g} />)}
         </div>
       )}
 
@@ -78,6 +81,55 @@ export default function GiftsPage({ hint }: { hint?: string }) {
           <div className="modal product-modal" onClick={e => e.stopPropagation()}>
             <GiftShare gift={sharing} onClose={() => setSharing(null)} />
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Sub-collections of one gift collection go together, in part order. */
+function groupSent(gifts: Gift[]): (Gift | Gift[])[] {
+  const out: (Gift | Gift[])[] = [];
+  const groups = new Map<string, Gift[]>();
+  for (const g of gifts) {
+    if (!g.groupId) { out.push(g); continue; }
+    let group = groups.get(g.groupId);
+    if (!group) { group = []; groups.set(g.groupId, group); out.push(group); }
+    group.push(g);
+  }
+  for (const group of groups.values()) group.sort((a, b) => (a.part ?? 0) - (b.part ?? 0));
+  return out;
+}
+
+function GiftGroup({ gifts, onShare, onCancel }: { gifts: Gift[]; onShare: (g: Gift) => void; onCancel: (g: Gift) => void }) {
+  const [open, setOpen] = useState(false);
+  const total = gifts.reduce((n, g) => n + g.total, 0);
+  const claimed = gifts.reduce((n, g) => n + g.claims.length, 0);
+  const pct = total ? Math.round((claimed / total) * 100) : 0;
+  const first = gifts[0];
+  return (
+    <div className="card order-card gift-card">
+      <div className="oc-head">
+        <div style={{ display: 'flex', gap: 12, minWidth: 0 }}>
+          {first.image && <img src={first.image} alt="" className="gift-thumb" />}
+          <div style={{ minWidth: 0 }}>
+            <div className="oc-title">{first.title}</div>
+            <div className="muted" style={{ fontSize: 12 }}>{gifts.length} підколекцій · створено {fmtAgo(first.createdAt)}</div>
+          </div>
+        </div>
+        <span className="badge badge-info">🎁 Колекція</span>
+      </div>
+      <div className="meter" style={{ marginTop: 12 }}>
+        <div className="meter-head"><span>Забрали</span><span><strong>{claimed}</strong> <span className="muted">з {total}</span></span></div>
+        <div className="meter-track"><div className="meter-fill" style={{ width: `${pct}%` }} /></div>
+      </div>
+      <div className="card-actions">
+        <button className="btn btn-primary" onClick={() => printGiftQrs(gifts.filter(g => g.status === 'active'))}><Icon.QrCode /> Друкувати QR</button>
+        <button className="btn" onClick={() => setOpen(o => !o)}>{open ? 'Сховати частини' : `Частини (${gifts.length})`}</button>
+      </div>
+      {open && (
+        <div className="order-list" style={{ marginTop: 10 }}>
+          {gifts.map(g => <SentGift key={g.id} gift={g} onShare={() => onShare(g)} onCancel={() => onCancel(g)} />)}
         </div>
       )}
     </div>
@@ -94,8 +146,10 @@ function SentGift({ gift: g, onShare, onCancel }: { gift: Gift; onShare: () => v
         <div style={{ display: 'flex', gap: 12, minWidth: 0 }}>
           {g.image && <img src={g.image} alt="" className="gift-thumb" />}
           <div style={{ minWidth: 0 }}>
-            <div className="oc-title">{g.title}</div>
-            <div className="muted" style={{ fontSize: 12 }}>Створено {fmtAgo(g.createdAt)}</div>
+            <div className="oc-title">{g.parts ? `Частина ${g.part} з ${g.parts}` : g.title}</div>
+            <div className="muted" style={{ fontSize: 12 }}>
+              {g.parts ? `${g.total} NFT${g.allowAll ? ' · можна забрати всю' : ''}` : `Створено ${fmtAgo(g.createdAt)}`}
+            </div>
           </div>
         </div>
         <span className={`badge ${STATUS[g.status].tone}`}>{STATUS[g.status].label}</span>

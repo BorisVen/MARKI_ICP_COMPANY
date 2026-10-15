@@ -30,6 +30,8 @@ use crate::{
 
 const MAX_ITEMS: usize = 1_000;
 const MAX_MESSAGE: usize = 280;
+/// A gift collection splits into at most this many links / QR codes.
+const MAX_PARTS: usize = 100;
 
 static CLAIM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -67,6 +69,17 @@ pub struct Gift {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Sub-collections of one gift collection share a group id (one QR each).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    /// 1-based part number and number of parts in the group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<u32>,
+    /// One person may take the whole sub-collection instead of one NFT.
+    #[serde(default)]
+    pub allow_all: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +88,25 @@ pub struct CreateGiftRequest {
     pub nft_ids: Vec<String>,
     pub title: Option<String>,
     pub message: Option<String>,
+    /// Split into this many sub-collections (default 1).
+    #[serde(default)]
+    pub parts: Option<u32>,
+    #[serde(default)]
+    pub allow_all: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimGiftRequest {
+    /// Take every NFT left in this sub-collection (when the sender allows it).
+    #[serde(default)]
+    pub all: bool,
+}
+
+/// Sizes of `parts` near-equal chunks of `n` items (bigger chunks first).
+pub fn split_sizes(n: usize, parts: usize) -> Vec<usize> {
+    let parts = parts.clamp(1, n.max(1));
+    (0..parts).map(|i| n / parts + usize::from(i < n % parts)).collect()
 }
 
 /// What anyone with the link sees before signing in.
@@ -91,6 +123,11 @@ pub struct GiftPreview {
     pub total: usize,
     pub remaining: usize,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parts: Option<u32>,
+    pub allow_all: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,9 +212,28 @@ pub async fn create_gift(
     Extension(auth): Extension<AuthenticatedUser>,
     Json(body): Json<CreateGiftRequest>,
 ) -> ApiResult<(StatusCode, Json<Gift>)> {
-    let mut ids = body.nft_ids;
-    ids.sort();
-    ids.dedup();
+    let body = CreateGiftRequest { parts: Some(1), ..body };
+    let mut gifts = build_gifts(&state, &auth, body).await?;
+    Ok((StatusCode::CREATED, Json(gifts.remove(0))))
+}
+
+/// `POST /api/gifts/split` — a gift collection split into sub-collections, one link/QR each.
+pub async fn create_gift_group(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthenticatedUser>,
+    Json(body): Json<CreateGiftRequest>,
+) -> ApiResult<(StatusCode, Json<Vec<Gift>>)> {
+    Ok((StatusCode::CREATED, Json(build_gifts(&state, &auth, body).await?)))
+}
+
+async fn build_gifts(state: &AppState, auth: &AuthenticatedUser, body: CreateGiftRequest) -> ApiResult<Vec<Gift>> {
+    // Keep the given order (edition order), dropping duplicates.
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<String> = body.nft_ids.into_iter().filter(|id| seen.insert(id.clone())).collect();
+    let parts = body.parts.unwrap_or(1) as usize;
+    if parts == 0 || parts > MAX_PARTS || parts > ids.len().max(1) {
+        return Err(AppError::BadRequest(format!("Sub-collections must be 1–{} and no more than the NFTs", MAX_PARTS)));
+    }
     if ids.is_empty() || ids.len() > MAX_ITEMS {
         return Err(AppError::BadRequest(format!("Choose 1–{MAX_ITEMS} NFTs")));
     }
@@ -186,8 +242,8 @@ pub async fn create_gift(
         return Err(AppError::BadRequest(format!("Message is longer than {MAX_MESSAGE} characters")));
     }
 
-    let wallet = load_nfts(&state, &auth.uid).await?;
-    let reserved = reserved_ids(&state, &auth.uid).await?;
+    let wallet = load_nfts(state, &auth.uid).await?;
+    let reserved = reserved_ids(state, &auth.uid).await?;
     let mut picked = Vec::with_capacity(ids.len());
     for id in &ids {
         let nft = wallet
@@ -207,7 +263,7 @@ pub async fn create_gift(
         picked.push(nft.clone());
     }
 
-    let owner = user_doc(&state, &auth.uid).await?;
+    let owner = user_doc(state, &auth.uid).await?;
     let first = &picked[0];
     let title = body
         .title
@@ -216,27 +272,37 @@ pub async fn create_gift(
         .or_else(|| first.batch_name.clone())
         .unwrap_or_else(|| first.title.clone());
     let now = Utc::now().to_rfc3339();
-    let gift = Gift {
-        id: new_code(),
-        owner_id: auth.uid.clone(),
-        owner_name: Some(text(&owner, "companyName"))
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| text(&owner, "name")),
-        owner_username: text(&owner, "username"),
-        from_company: owner.get("companyApproved").and_then(Value::as_bool).unwrap_or(false),
-        title,
-        message,
-        image: first.image.clone(),
-        total: picked.len(),
-        remaining_nft_ids: picked.iter().map(|n| n.id.clone()).collect(),
-        claims: vec![],
-        claimed_by: vec![],
-        status: "active".into(),
-        created_at: now.clone(),
-        updated_at: now,
-    };
-    save_gift(&state, &gift).await?;
-    Ok((StatusCode::CREATED, Json(gift)))
+    let group_id = (parts > 1).then(new_code);
+    let owner_name = Some(text(&owner, "companyName")).filter(|n| !n.is_empty()).unwrap_or_else(|| text(&owner, "name"));
+    let mut gifts = Vec::with_capacity(parts);
+    let mut items = picked.iter();
+    for (i, size) in split_sizes(picked.len(), parts).into_iter().enumerate() {
+        let chunk: Vec<String> = items.by_ref().take(size).map(|n| n.id.clone()).collect();
+        let gift = Gift {
+            id: new_code(),
+            owner_id: auth.uid.clone(),
+            owner_name: owner_name.clone(),
+            owner_username: text(&owner, "username"),
+            from_company: owner.get("companyApproved").and_then(Value::as_bool).unwrap_or(false),
+            title: title.clone(),
+            message: message.clone(),
+            image: first.image.clone(),
+            total: chunk.len(),
+            remaining_nft_ids: chunk,
+            claims: vec![],
+            claimed_by: vec![],
+            status: "active".into(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            group_id: group_id.clone(),
+            part: group_id.as_ref().map(|_| i as u32 + 1),
+            parts: group_id.as_ref().map(|_| parts as u32),
+            allow_all: body.allow_all,
+        };
+        save_gift(state, &gift).await?;
+        gifts.push(gift);
+    }
+    Ok(gifts)
 }
 
 /// `GET /api/gifts` — gifts I sent (with every claim) and gifts I received.
@@ -279,6 +345,9 @@ pub async fn preview_gift(
         from_company: g.from_company,
         total: g.total,
         status: g.status,
+        part: g.part,
+        parts: g.parts,
+        allow_all: g.allow_all,
     }))
 }
 
@@ -287,7 +356,9 @@ pub async fn claim_gift(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthenticatedUser>,
     Path(code): Path<String>,
+    body: Option<Json<ClaimGiftRequest>>,
 ) -> ApiResult<Json<Value>> {
+    let take_all = body.map(|b| b.0.all).unwrap_or(false);
     let _guard = CLAIM_LOCK.lock().await;
     let mut gift = load_gift(&state, &code).await?;
     if gift.status == "cancelled" {
@@ -300,55 +371,59 @@ pub async fn claim_gift(
         return Err(AppError::Conflict("You already claimed this gift".into()));
     }
 
+    if take_all && !gift.allow_all {
+        return Err(AppError::BadRequest("The sender allows one NFT per person here".into()));
+    }
+
     let mut owner_wallet = load_nfts(&state, &gift.owner_id).await?;
     // Skip ids the owner no longer has (sold or deleted since the gift was made).
-    let pick = gift
-        .remaining_nft_ids
-        .iter()
-        .position(|id| owner_wallet.iter().any(|n| &n.id == id));
-    let Some(pick) = pick else {
-        gift.remaining_nft_ids.clear();
+    gift.remaining_nft_ids.retain(|id| owner_wallet.iter().any(|n| &n.id == id));
+    if gift.remaining_nft_ids.is_empty() {
         gift.status = "completed".into();
         gift.updated_at = Utc::now().to_rfc3339();
         save_gift(&state, &gift).await?;
         return Err(AppError::Conflict("All items of this gift are already taken".into()));
-    };
-    let source_id = gift.remaining_nft_ids.remove(pick);
-    let pos = owner_wallet.iter().position(|n| n.id == source_id).unwrap();
-    let source = owner_wallet.remove(pos);
+    }
+    let take = if take_all { gift.remaining_nft_ids.len() } else { 1 };
+    let source_ids: Vec<String> = gift.remaining_nft_ids.drain(..take).collect();
 
     let me = user_doc(&state, &auth.uid).await?;
     let my_name = text(&me, "name");
-    let new_id = Uuid::new_v4().to_string();
     let username = text(&me, "username");
-    let owners = source.owners_with(&auth.uid, &my_name, (!username.is_empty()).then_some(username), "gift", &Utc::now().to_rfc3339());
-    let received = crate::models::Nft {
-        owners,
-        id: new_id.clone(),
-        owner_id: auth.uid.clone(),
-        owner_name: my_name.clone(),
-        for_sale: false,
-        price: None,
-        gift_from: Some(gift.owner_name.clone()),
-        gift_id: Some(gift.id.clone()),
-        ..source
-    };
-    let nft_title = received.title.clone();
+    let now = Utc::now().to_rfc3339();
+    let mut received_all = Vec::with_capacity(take);
+    for source_id in &source_ids {
+        let pos = owner_wallet.iter().position(|n| &n.id == source_id).unwrap();
+        let source = owner_wallet.remove(pos);
+        let new_id = Uuid::new_v4().to_string();
+        let owners = source.owners_with(&auth.uid, &my_name, (!username.is_empty()).then(|| username.clone()), "gift", &now);
+        received_all.push(crate::models::Nft {
+            owners,
+            id: new_id.clone(),
+            owner_id: auth.uid.clone(),
+            owner_name: my_name.clone(),
+            for_sale: false,
+            price: None,
+            gift_from: Some(gift.owner_name.clone()),
+            gift_id: Some(gift.id.clone()),
+            ..source
+        });
+        gift.claims.push(GiftClaim {
+            nft_id: new_id,
+            source_nft_id: source_id.clone(),
+            uid: auth.uid.clone(),
+            name: my_name.clone(),
+            username: username.clone(),
+            claimed_at: now.clone(),
+        });
+    }
+    let nft_title = if take > 1 { format!("{} ×{}", received_all[0].title, take) } else { received_all[0].title.clone() };
 
     save_nfts(&state, &gift.owner_id, &owner_wallet).await?;
     let mut my_wallet = load_nfts(&state, &auth.uid).await?;
-    my_wallet.push(received.clone());
+    my_wallet.extend(received_all.iter().cloned());
     save_nfts(&state, &auth.uid, &my_wallet).await?;
 
-    let now = Utc::now().to_rfc3339();
-    gift.claims.push(GiftClaim {
-        nft_id: new_id,
-        source_nft_id: source_id,
-        uid: auth.uid.clone(),
-        name: my_name.clone(),
-        username: text(&me, "username"),
-        claimed_at: now.clone(),
-    });
     gift.claimed_by.push(auth.uid.clone());
     if gift.remaining_nft_ids.is_empty() {
         gift.status = "completed".into();
@@ -361,7 +436,7 @@ pub async fn claim_gift(
     notify(&state, &gift.owner_id, "Your gift was claimed 🎁".into(),
         format!("{} claimed \"{}\" ({} of {} left)", my_name, nft_title, gift.remaining_nft_ids.len(), gift.total), &nft_title).await;
 
-    Ok(Json(json!({ "gift": gift, "nft": received })))
+    Ok(Json(json!({ "gift": gift, "nft": received_all[0], "nfts": received_all })))
 }
 
 /// `DELETE /api/gifts/:code` — stop the link; unclaimed NFTs stay with the owner.
@@ -386,7 +461,7 @@ pub async fn cancel_gift(
 
 #[cfg(test)]
 mod tests {
-    use super::new_code;
+    use super::{new_code, split_sizes};
 
     #[test]
     fn codes_are_16_hex_and_unique() {
@@ -395,5 +470,14 @@ mod tests {
         assert_eq!(a.len(), 16);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn collections_split_into_near_equal_parts() {
+        assert_eq!(split_sizes(100, 4), [25, 25, 25, 25]);
+        assert_eq!(split_sizes(75, 4), [19, 19, 19, 18]);
+        assert_eq!(split_sizes(3, 5), [1, 1, 1]);
+        assert_eq!(split_sizes(10, 1), [10]);
+        assert_eq!(split_sizes(87, 10).iter().sum::<usize>(), 87);
     }
 }

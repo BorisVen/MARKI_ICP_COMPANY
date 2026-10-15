@@ -471,15 +471,27 @@ export type Gift = {
   status: 'active' | 'completed' | 'cancelled';
   createdAt: string;
   updatedAt: string;
+  /** Sub-collections of one gift collection share a group id; one QR each. */
+  groupId?: string;
+  part?: number;
+  parts?: number;
+  /** One person may take the whole sub-collection. */
+  allowAll?: boolean;
 };
 export type GiftPreview = {
   id: string; title: string; message: string; image: string; ownerName: string; ownerUsername: string;
   fromCompany: boolean; total: number; remaining: number; status: Gift['status'];
+  part?: number; parts?: number; allowAll?: boolean;
 };
 export const apiCreateGift = (d: { nftIds: string[]; title?: string; message?: string }) => post<Gift>('/api/gifts', d);
+/** A gift collection split into `parts` sub-collections (one link/QR each; parts = 1 gives one). */
+export const apiCreateGiftGroup = (d: { nftIds: string[]; title?: string; message?: string; parts: number; allowAll: boolean }) =>
+  post<Gift[]>('/api/gifts/split', d);
 export const apiMyGifts    = () => get<{ sent: Gift[]; received: Gift[] }>('/api/gifts');
 export const apiCancelGift = (code: string) => del<Gift>(`/api/gifts/${encodeURIComponent(code)}`);
-export const apiClaimGift  = (code: string) => post<{ gift: Gift; nft: NFT }>(`/api/gifts/${encodeURIComponent(code)}/claim`);
+/** `all`: take the whole sub-collection (when the sender allows it). */
+export const apiClaimGift  = (code: string, all = false) =>
+  post<{ gift: Gift; nft: NFT; nfts?: NFT[] }>(`/api/gifts/${encodeURIComponent(code)}/claim`, { all });
 export const apiGiftPreview = (code: string) => get<GiftPreview>(`/api/public/gifts/${encodeURIComponent(code)}`);
 
 // ── Goods authenticity (products → batches → units) ─────────────────────────

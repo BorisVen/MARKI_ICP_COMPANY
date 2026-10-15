@@ -79,6 +79,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // Gifts
         .route("/gifts", get(gifts::my_gifts))
         .route("/gifts", post(gifts::create_gift))
+        .route("/gifts/split", post(gifts::create_gift_group))
         .route("/gifts/:code", delete(gifts::cancel_gift))
         .route("/gifts/:code/claim", post(gifts::claim_gift))
         // Goods authenticity (products → batches → units)

@@ -83,6 +83,8 @@ type Token = record {
   metadata : text;
   image_id : opt nat64;
   minted_at_ns : nat64;
+  edition : opt nat32;
+  edition_total : opt nat32;
 };
 type MintResult = record {
   token_ids : vec nat64;

@@ -881,6 +881,12 @@ struct Token {
     metadata: String,
     image_id: Option<u64>,
     minted_at_ns: u64,
+    /// Copy number within one edition mint ("5 of 100"); None for single mints.
+    /// Defaulted so tokens stored before editions were numbered still load.
+    #[serde(default)]
+    edition: Option<u32>,
+    #[serde(default)]
+    edition_total: Option<u32>,
 }
 
 struct Upload {
@@ -918,7 +924,10 @@ fn check_metadata(metadata: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn insert_tokens(owner: Principal, metadata: Vec<String>, image_id: Option<u64>, now: u64) -> Vec<u64> {
+/// `numbered`: the tokens are copies of one edition and get "i of n" on-chain.
+fn insert_tokens(owner: Principal, metadata: Vec<String>, image_id: Option<u64>, now: u64, numbered: bool) -> Vec<u64> {
+    let total = metadata.len() as u32;
+    let numbered = numbered && total > 1;
     let first = update_settings(|s| {
         let first = s.next_token;
         s.next_token += metadata.len() as u64;
@@ -929,7 +938,15 @@ fn insert_tokens(owner: Principal, metadata: Vec<String>, image_id: Option<u64>,
         .enumerate()
         .map(|(i, metadata)| {
             let id = first + i as u64;
-            TOKENS.with(|m| m.borrow_mut().insert(id, Token { owner, metadata, image_id, minted_at_ns: now }));
+            let token = Token {
+                owner,
+                metadata,
+                image_id,
+                minted_at_ns: now,
+                edition: numbered.then_some(i as u32 + 1),
+                edition_total: numbered.then_some(total),
+            };
+            TOKENS.with(|m| m.borrow_mut().insert(id, token));
             OWNER_TOKENS.with(|m| m.borrow_mut().insert(owner_key(&owner, id), ()));
             id
         })
@@ -1004,7 +1021,7 @@ fn mint_uploaded(upload_id: u64, metadata: String, copies: u32) -> Result<MintRe
     IMAGES.with(|m| m.borrow_mut().insert(image_id, Image(bytes)));
 
     let now = ic_cdk::api::time();
-    let token_ids = insert_tokens(owner, vec![metadata; copies as usize], Some(image_id), now);
+    let token_ids = insert_tokens(owner, vec![metadata; copies as usize], Some(image_id), now, true);
     Ok(MintResult { token_ids, image_bytes: size, subscription })
 }
 
@@ -1019,7 +1036,7 @@ fn mint_metadata(items: Vec<String>) -> Result<MintResult, String> {
         check_metadata(m)?;
     }
     let subscription = spend_credits(owner, UsageKind::Metadata, items.len() as u64, 0)?;
-    let token_ids = insert_tokens(owner, items, None, ic_cdk::api::time());
+    let token_ids = insert_tokens(owner, items, None, ic_cdk::api::time(), false);
     Ok(MintResult { token_ids, image_bytes: 0, subscription })
 }
 
@@ -1081,6 +1098,10 @@ fn icrc7_token_metadata(ids: Vec<Nat>) -> Vec<Option<Vec<(String, Value)>>> {
                 ("marki:metadata".to_string(), Value::Text(t.metadata.clone())),
                 ("marki:minted_at_ns".to_string(), Value::Nat(Nat::from(t.minted_at_ns))),
             ];
+            if let (Some(n), Some(total)) = (t.edition, t.edition_total) {
+                fields.push(("marki:edition".to_string(), Value::Nat(Nat::from(n))));
+                fields.push(("marki:edition_total".to_string(), Value::Nat(Nat::from(total))));
+            }
             if let Some(img) = t.image_id.and_then(|i| IMAGES.with(|m| m.borrow().get(&i))) {
                 fields.push(("marki:image_bytes".to_string(), Value::Nat(Nat::from(img.0.len()))));
             }
@@ -1183,6 +1204,19 @@ mod tests {
         let s = roundtrip(Settings::default());
         assert_eq!(s.ledger, Principal::from_text(ICP_LEDGER).unwrap());
         assert_eq!(roundtrip(PlanList(default_plans())).0.len(), 3);
+    }
+
+    #[test]
+    fn tokens_stored_before_numbering_still_load() {
+        // A token as the live canister stored it before edition numbers existed.
+        #[derive(Serialize)]
+        struct OldToken { owner: Principal, metadata: String, image_id: Option<u64>, minted_at_ns: u64 }
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&OldToken { owner: Principal::anonymous(), metadata: "{}".into(), image_id: Some(1), minted_at_ns: 7 }, &mut bytes).unwrap();
+        let t = Token::from_bytes(Cow::Owned(bytes));
+        assert_eq!((t.minted_at_ns, t.edition, t.edition_total), (7, None, None));
+        let numbered = roundtrip(Token { edition: Some(5), edition_total: Some(100), ..t });
+        assert_eq!((numbered.edition, numbered.edition_total), (Some(5), Some(100)));
     }
 
     #[test]

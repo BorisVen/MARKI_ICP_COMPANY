@@ -311,6 +311,15 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');
   const [success, setSuccess] = useState(false);
+  // Gift collection: right after the mint, open the gift form with the new NFTs.
+  const [giftCollection, setGiftCollection] = useState(false);
+  const [newIds, setNewIds] = useState<string[]>([]);
+  const [giftNfts, setGiftNfts] = useState<NFT[] | null>(null);
+  const openGift = async (ids: string[]) => {
+    const all = await apiGetNFTs().catch(() => [] as NFT[]);
+    const picked = ids.map(id => all.find(n => n.id === id)).filter(Boolean) as NFT[];
+    if (picked.length) setGiftNfts(picked);
+  };
   const [dragOver, setDragOver] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -459,6 +468,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
 
         const collectionImageUrls: string[] = successful.map((r: any) => r.imageUrl);
         const collectionNftIds: string[] = successful.map((r: any) => r.id);
+        setNewIds(collectionNftIds);
 
         setUploadProgress('Крок 3/3 — Публікація у стрічку…');
         await apiCreatePost({
@@ -496,6 +506,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
           setUploadProgress('Крок 2/3 — Мінт editions у ICP (reverse gas)…');
           const edResult: any = await apiCreateEditionNFTs(editionForm);
           const editionIds: string[] = edResult?.editionIds ?? [];
+          setNewIds(editionIds);
           const imageUrl: string = edResult?.imageUrl ?? '';
 
           setUploadProgress('Крок 3/3 — Публікація у стрічку…');
@@ -524,6 +535,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
           setUploadProgress('Крок 2/3 — Мінт у ICP (reverse gas)…');
           const result: any = await apiCreateNFT(form);
           const nftId = result?.id;
+          if (nftId) setNewIds([nftId]);
           if (!nftId) throw new Error('Бекенд не повернув id');
           if (oneMint) await apiUpdateNFT(nftId, { mintAddress: icpMintAddress(oneMint.tokenIds[0]) });
 
@@ -544,6 +556,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
 
       if (ICP_MINT_ENABLED) plan.refresh();
       setSuccess(true);
+      if (giftCollection) setNewIds(ids => { openGift(ids); return ids; });
       setUploadProgress('');
     } catch (e: any) {
       console.error('[NFTs] mint failed:', e);
@@ -586,12 +599,18 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
         </p>
         {previewUrl && <img src={previewUrl} alt={title} className="img-preview" />}
         {chainMint && <ChainMintSummary mint={chainMint} />}
-        <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 16 }}>
-          <button className="btn btn-primary" onClick={handleReset}>
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 16, flexWrap: 'wrap' }}>
+          {newIds.length > 0 && !forSale && (
+            <button className="btn btn-primary" onClick={() => openGift(newIds)}>
+              <Icon.Gift /> {newIds.length > 1 ? `Подарувати колекцію (${newIds.length})` : 'Подарувати'}
+            </button>
+          )}
+          <button className="btn" onClick={handleReset}>
             <Icon.Plus /> Створити ще
           </button>
           <button className="btn" onClick={onDone}>До списку</button>
         </div>
+        {giftNfts && <CreateGiftModal nfts={giftNfts} all onClose={() => setGiftNfts(null)} />}
       </div>
     );
   }
@@ -863,9 +882,19 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
 
         {step === 3 && (
           <div className="card">
-            <h3>Виставити на продаж</h3>
+            <h3>Подарунок чи продаж</h3>
 
             <div className="toggle-row">
+              <div>
+                <div className="lbl">🎁 Подарункова колекція</div>
+                <div className="sub">Одразу після випуску — посилання й QR: можна розбити на підколекції.</div>
+              </div>
+              <div className={`switch ${giftCollection ? 'on' : ''}`} onClick={() => { setGiftCollection(!giftCollection); if (!giftCollection) setForSale(false); }}>
+                <div className="knob" />
+              </div>
+            </div>
+
+            {!giftCollection && <div className="toggle-row">
               <div>
                 <div className="lbl">Одразу лістити на маркетплейс</div>
                 <div className="sub">Можна увімкнути пізніше, у редагуванні.</div>
@@ -873,7 +902,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
               <div className={`switch ${forSale ? 'on' : ''}`} onClick={() => setForSale(!forSale)}>
                 <div className="knob" />
               </div>
-            </div>
+            </div>}
 
             {forSale && (
               <>

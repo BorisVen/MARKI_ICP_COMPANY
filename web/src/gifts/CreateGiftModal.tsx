@@ -1,41 +1,48 @@
 import { useEffect, useMemo, useState } from 'react';
 import QRCode from 'qrcode';
-import { apiCreateGift, type Gift, type NFT } from '../api';
+import { apiCreateGiftGroup, type Gift, type NFT } from '../api';
 import { Icon } from '../icons';
 import { giftUrl } from './giftLink';
+import { printGiftQrs } from './printGifts';
 
 /**
  * Turn NFTs into a gift link. `nfts` are the candidates (one passport or a whole
  * collection); the sender picks how many copies the link gives away.
  */
-export default function CreateGiftModal({ nfts, onClose, onCreated }: {
+export default function CreateGiftModal({ nfts, onClose, onCreated, all }: {
   nfts: NFT[];
   onClose: () => void;
   onCreated?: (gift: Gift) => void;
+  /** Start with every available NFT selected (a fresh gift collection). */
+  all?: boolean;
 }) {
   // The edition master is the original, not a copy: it is neither counted nor gifted.
   const copies = useMemo(() => nfts.filter(n => !(n.editionNumber === 0 && n.editionCount)), [nfts]);
   // Items on sale cannot be gifted.
   const available = useMemo(() => copies.filter(n => !n.forSale), [copies]);
   const first = available[0] ?? copies[0] ?? nfts[0];
-  const [count, setCount] = useState(Math.min(available.length, 1) || 0);
+  const [count, setCount] = useState(all ? available.length : Math.min(available.length, 1) || 0);
+  const [parts, setParts] = useState(1);
+  const [allowAll, setAllowAll] = useState(true);
   const [title, setTitle] = useState(first?.batchName || first?.title || '');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [gift, setGift] = useState<Gift | null>(null);
+  const [created, setCreated] = useState<Gift[] | null>(null);
 
   const create = async () => {
     setBusy(true);
     setError(null);
     try {
-      const g = await apiCreateGift({
+      const gifts = await apiCreateGiftGroup({
         nftIds: available.slice(0, count).map(n => n.id),
         title: title.trim() || undefined,
         message: message.trim() || undefined,
+        parts: Math.min(parts, count),
+        allowAll: parts > 1 || count > 1 ? allowAll : false,
       });
-      setGift(g);
-      onCreated?.(g);
+      setCreated(gifts);
+      onCreated?.(gifts[0]);
     } catch (e: any) {
       setError(e?.message ?? 'Не вдалося створити подарунок');
     } finally {
@@ -46,7 +53,7 @@ export default function CreateGiftModal({ nfts, onClose, onCreated }: {
   return (
     <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
       <div className="modal product-modal" onClick={e => e.stopPropagation()}>
-        {gift ? <GiftShare gift={gift} onClose={onClose} /> : (
+        {created ? (created.length === 1 ? <GiftShare gift={created[0]} onClose={onClose} /> : <GroupShare gifts={created} onClose={onClose} />) : (
           <>
             <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Icon.Gift /> Подарувати</h3>
             <p className="sub" style={{ marginTop: 0 }}>
@@ -77,8 +84,31 @@ export default function CreateGiftModal({ nfts, onClose, onCreated }: {
                       onChange={e => setCount(Math.min(available.length, Math.max(1, Number(e.target.value) || 1)))} />
                     <button type="button" className="btn" onClick={() => setCount(Math.min(available.length, count + 1))}>+</button>
                   </div>
-                  <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>Кожна людина отримає 1 NFT. Одне посилання — до {count} отримувачів.</div>
+                  <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>Скільки NFT іде в подарунок.</div>
                 </div>
+                {count > 1 && (
+                  <div className="field">
+                    <label>Розбити на підколекції (окремий QR на кожну)</label>
+                    <div className="stepper-input">
+                      <button type="button" className="btn" onClick={() => setParts(Math.max(1, parts - 1))}>−</button>
+                      <input type="number" min={1} max={Math.min(100, count)} value={parts}
+                        onChange={e => setParts(Math.min(Math.min(100, count), Math.max(1, Number(e.target.value) || 1)))} />
+                      <button type="button" className="btn" onClick={() => setParts(Math.min(Math.min(100, count), parts + 1))}>+</button>
+                    </div>
+                    <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+                      {parts === 1 ? `Одне посилання на всі ${count} NFT.` : `${parts} QR по ~${Math.ceil(count / parts)} NFT.`}
+                    </div>
+                  </div>
+                )}
+                {count > 1 && (
+                  <label className="toggle-row" style={{ cursor: 'pointer' }}>
+                    <div>
+                      <div className="lbl">Можна забрати всю підколекцію</div>
+                      <div className="sub">Інакше кожна людина забирає по 1 NFT.</div>
+                    </div>
+                    <input type="checkbox" checked={allowAll} onChange={e => setAllowAll(e.target.checked)} />
+                  </label>
+                )}
                 <div className="field">
                   <label>Назва подарунку</label>
                   <input value={title} maxLength={60} onChange={e => setTitle(e.target.value)} />
@@ -142,6 +172,28 @@ export function GiftShare({ gift, onClose }: { gift: Gift; onClose?: () => void 
         <button className="btn btn-primary" onClick={share}><Icon.Upload /> Поділитися</button>
         {onClose && <button className="btn" onClick={onClose}>Готово</button>}
       </div>
+    </div>
+  );
+}
+
+/** All sub-collections of a gift collection: one QR each, printable on one sheet. */
+export function GroupShare({ gifts, onClose }: { gifts: Gift[]; onClose?: () => void }) {
+  const total = gifts.reduce((n, g) => n + g.total, 0);
+  return (
+    <div style={{ textAlign: 'center' }}>
+      <div style={{ fontSize: 40 }}>🎁</div>
+      <h3 style={{ margin: '4px 0' }}>Подарункова колекція готова</h3>
+      <p className="sub" style={{ marginTop: 0 }}>«{gifts[0]?.title}» · {total} NFT у {gifts.length} підколекціях</p>
+      <button className="btn btn-primary btn-block" onClick={() => printGiftQrs(gifts)}><Icon.QrCode /> Друкувати всі QR ({gifts.length})</button>
+      <div className="group-share-list">
+        {gifts.map(g => (
+          <div key={g.id} className="group-share-row">
+            <span>Частина {g.part} з {g.parts} · {g.total} NFT</span>
+            <button className="btn" onClick={() => navigator.clipboard.writeText(giftUrl(g.id))}>Копіювати посилання</button>
+          </div>
+        ))}
+      </div>
+      {onClose && <div className="actions" style={{ justifyContent: 'center' }}><button className="btn" onClick={onClose}>Готово</button></div>}
     </div>
   );
 }

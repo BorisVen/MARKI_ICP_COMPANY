@@ -1838,3 +1838,5 @@ details.soft[open] summary { margin-bottom: 10px; }
 .goods-unit { display: grid; grid-template-columns: 70px 1fr auto; gap: 8px; padding: 8px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
 .goods-unit:last-child { border-bottom: none; }
 .goods-unit.flag { background: rgba(239,68,68,0.08); }
+.group-share-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; max-height: 260px; overflow-y: auto; text-align: left; }
+.group-share-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; font-size: 13px; }
