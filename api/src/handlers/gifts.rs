@@ -362,17 +362,17 @@ pub async fn claim_gift(
     let _guard = CLAIM_LOCK.lock().await;
     let mut gift = load_gift(&state, &code).await?;
     if gift.status == "cancelled" {
-        return Err(AppError::BadRequest("This gift was cancelled".into()));
+        return Err(AppError::BadRequest("Відправник скасував цей подарунок".into()));
     }
     if gift.owner_id == auth.uid {
-        return Err(AppError::BadRequest("You cannot claim your own gift".into()));
+        return Err(AppError::BadRequest("Це твій подарунок — забрати його можуть інші".into()));
     }
     if gift.claimed_by.contains(&auth.uid) {
-        return Err(AppError::Conflict("You already claimed this gift".into()));
+        return Err(AppError::Conflict("Ти вже забрав цей подарунок — він у твоїх паспортах".into()));
     }
 
     if take_all && !gift.allow_all {
-        return Err(AppError::BadRequest("The sender allows one NFT per person here".into()));
+        return Err(AppError::BadRequest("Тут можна забрати лише 1 NFT".into()));
     }
 
     let mut owner_wallet = load_nfts(&state, &gift.owner_id).await?;
@@ -382,7 +382,7 @@ pub async fn claim_gift(
         gift.status = "completed".into();
         gift.updated_at = Utc::now().to_rfc3339();
         save_gift(&state, &gift).await?;
-        return Err(AppError::Conflict("All items of this gift are already taken".into()));
+        return Err(AppError::Conflict("Усі NFT з цього подарунка вже забрали".into()));
     }
     let take = if take_all { gift.remaining_nft_ids.len() } else { 1 };
     let source_ids: Vec<String> = gift.remaining_nft_ids.drain(..take).collect();
@@ -431,10 +431,18 @@ pub async fn claim_gift(
     gift.updated_at = now;
     save_gift(&state, &gift).await?;
 
-    notify(&state, &auth.uid, "You received a gift 🎁".into(),
-        format!("\"{}\" from {} is now in your passports", nft_title, gift.owner_name), &nft_title).await;
-    notify(&state, &gift.owner_id, "Your gift was claimed 🎁".into(),
-        format!("{} claimed \"{}\" ({} of {} left)", my_name, nft_title, gift.remaining_nft_ids.len(), gift.total), &nft_title).await;
+    // Notifications don't need to hold up the answer: a slow phone network may
+    // drop a long request even though the claim already went through.
+    {
+        let (st, uid, owner_id, owner_name) = (state.clone(), auth.uid.clone(), gift.owner_id.clone(), gift.owner_name.clone());
+        let (left, total, my_name, nft_title) = (gift.remaining_nft_ids.len(), gift.total, my_name.clone(), nft_title.clone());
+        tokio::spawn(async move {
+            notify(&st, &uid, "You received a gift 🎁".into(),
+                format!("\"{}\" from {} is now in your passports", nft_title, owner_name), &nft_title).await;
+            notify(&st, &owner_id, "Your gift was claimed 🎁".into(),
+                format!("{} claimed \"{}\" ({} of {} left)", my_name, nft_title, left, total), &nft_title).await;
+        });
+    }
 
     Ok(Json(json!({ "gift": gift, "nft": received_all[0], "nfts": received_all })))
 }
