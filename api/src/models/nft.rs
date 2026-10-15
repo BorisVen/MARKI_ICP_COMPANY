@@ -117,6 +117,10 @@ pub struct CreateNftRequest {
     pub for_sale: bool,
     /// Number of on-chain editions to create (None or 1 = regular 1-of-1 mint).
     pub edition_count: Option<u32>,
+    /// On-chain addresses of editions already minted by the client (in order),
+    /// so 100 copies don't need 100 follow-up updates.
+    #[serde(default)]
+    pub mint_addresses: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

@@ -1,3 +1,4 @@
+import { TOKEN } from '../icp/wallet';
 import { useCallback, useEffect, useState } from 'react';
 import { Principal } from '@dfinity/principal';
 import { Icon } from '../icons';
@@ -181,7 +182,7 @@ export default function PricingPage() {
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
               <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                 <WalletConnect />
-                <span>Баланс: <strong>{balance === null ? '…' : fmtIcp(balance, 4)} ICP</strong></span>
+                <span>Баланс: <strong>{balance === null ? '…' : fmtIcp(balance, 4)} {TOKEN}</strong></span>
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
                 <button className="btn" onClick={refreshAll} disabled={!!busy}><Icon.Refresh /> Оновити</button>
@@ -218,7 +219,7 @@ export default function PricingPage() {
           const need = q.price_e8s + 2n * fee;
           const notEnough = balance !== null && balance < need;
           const label = !wallet ? 'Підключи гаманець'
-            : notEnough ? 'Недостатньо ICP'
+            : notEnough ? `Недостатньо ${TOKEN}`
             : current ? `Продовжити «${p.name}»` : `Обрати «${p.name}»`;
           return (
             <div key={p.id} className={`card plan-card ${featured ? 'featured' : ''}`}>
@@ -232,7 +233,7 @@ export default function PricingPage() {
                   {fmtUsd(p.price_usd_cents)}
                   <span className="muted" style={{ fontSize: 14, fontWeight: 400 }}> / міс</span>
                 </div>
-                <div className="muted" style={{ fontSize: 12 }}>≈ {fmtIcp(q.price_e8s, 2)} ICP · {perNft(q)} за NFT з фото</div>
+                <div className="muted" style={{ fontSize: 12 }}>≈ {fmtIcp(q.price_e8s, 2)} {TOKEN} · {perNft(q)} за NFT з фото</div>
               </div>
               <ul className="plan-features">
                 <li><span><strong>{fmtNum(p.photo_mints)}</strong> NFT з фото (до {fmtSize(p.max_photo_kb)})</span></li>
@@ -259,7 +260,7 @@ export default function PricingPage() {
           <div className="muted" style={{ fontSize: 12, lineHeight: 1.6 }}>
             Ціни встановлені в доларах. У момент оплати вони переводяться в ICP за курсом Internet Computer:
             1 ICP = {(Number(plans[0].xdr_permyriad_per_icp) / 10_000).toFixed(2)} XDR, 1 XDR ≈ ${pricing.xdr_usd}.
-            Мережа додає комісію 2 × {fmtIcp(fee)} ICP (дозвіл і списання). Якщо курс зміниться більше ніж на 2 %, оплата не пройде — просто повтори її.
+            Мережа додає комісію 2 × {fmtIcp(fee)} {TOKEN} (дозвіл і списання). Якщо курс зміниться більше ніж на 2 %, оплата не пройде — просто повтори її.
           </div>
         </details>
       )}
@@ -275,7 +276,7 @@ export default function PricingPage() {
                   <tr key={p.id.toString()}>
                     <td>{fmtDate(p.timestamp_ns)}</td>
                     <td>{planName(p.plan_id)}</td>
-                    <td>{fmtIcp(p.price_e8s, 4)} ICP</td>
+                    <td>{fmtIcp(p.price_e8s, 4)} {TOKEN}</td>
                   </tr>
                 ))}
               </tbody>

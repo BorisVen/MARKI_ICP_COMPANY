@@ -473,7 +473,8 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
           blockchain,
         });
       } else {
-        const numEditions = Math.max(1, parseInt(editionCount) || 1);
+        // The API stores up to 100 copies per request: mint no more than that.
+        const numEditions = Math.min(100, Math.max(1, parseInt(editionCount) || 1));
 
         if (numEditions > 1) {
           setUploadProgress('Крок 1/3 — Стиснення та завантаження зображення…');
@@ -488,17 +489,14 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
             ...baseMetadata,
             batchName: collectionName.trim() || title.trim(),
             editionCount: numEditions,
+            // Token numbers go with the records: no update per copy afterwards.
+            mintAddresses: edMint ? edMint.tokenIds.map(icpMintAddress) : [],
           }));
 
           setUploadProgress('Крок 2/3 — Мінт editions у ICP (reverse gas)…');
           const edResult: any = await apiCreateEditionNFTs(editionForm);
           const editionIds: string[] = edResult?.editionIds ?? [];
           const imageUrl: string = edResult?.imageUrl ?? '';
-          if (edMint) {
-            for (let i = 0; i < editionIds.length && i < edMint.tokenIds.length; i++) {
-              await apiUpdateNFT(editionIds[i], { mintAddress: icpMintAddress(edMint.tokenIds[i]) });
-            }
-          }
 
           setUploadProgress('Крок 3/3 — Публікація у стрічку…');
           await apiCreatePost({
@@ -844,7 +842,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
                 <input
                   type="number"
                   min="1"
-                  max="1000"
+                  max="100"
                   value={editionCount}
                   onChange={e => setEditionCount(e.target.value)}
                 />
@@ -919,7 +917,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
             )}
 
             {walletReady && ICP_MINT_ENABLED && (() => {
-              const need = isCollection ? collectionFiles.length : Math.max(1, parseInt(editionCount) || 1);
+              const need = isCollection ? collectionFiles.length : Math.min(100, Math.max(1, parseInt(editionCount) || 1));
               const left = plan.active ? Number(plan.subscription!.photo_mints_left) : 0;
               if (!plan.active) {
                 return <div className="notice notice-warn">Немає активного тарифу. Обери тариф у розділі «Тарифи», щоб випустити NFT.</div>;

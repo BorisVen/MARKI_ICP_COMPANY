@@ -806,7 +806,7 @@ pub async fn create_edition_nfts(
             master_nft_id:  has_master.then(|| master_id.clone()),
             batch_index:    Some(n),
             // Inherit everything else from master
-            mint_address:   None,
+            mint_address:   req.mint_addresses.get(n as usize - 1).cloned(),
             edition_count:  None, // only master carries the total
             ..master.clone()
         });

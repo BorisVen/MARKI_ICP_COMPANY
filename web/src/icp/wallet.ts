@@ -8,6 +8,9 @@ export const PAYMENTS_CANISTER_ID = (import.meta.env.VITE_ICP_PAYMENTS_CANISTER_
 export const LEDGER_CANISTER_ID =
   (import.meta.env.VITE_ICP_LEDGER_CANISTER_ID as string) || 'ryjl3-tyaaa-aaaaa-aaaba-cai';
 
+/** What the payments ledger is called: test tokens until the switch to real ICP. */
+export const TOKEN = LEDGER_CANISTER_ID === 'xafvr-biaaa-aaaai-aql5q-cai' ? 'TESTICP' : 'ICP';
+
 export type WalletKind = 'plug' | 'dev';
 
 export type Wallet = {
