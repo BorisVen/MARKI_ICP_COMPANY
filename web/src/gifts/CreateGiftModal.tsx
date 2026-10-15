@@ -77,14 +77,14 @@ export default function CreateGiftModal({ nfts, onClose, onCreated, all }: {
             ) : (
               <>
                 <div className="field">
-                  <label>Скільки людей отримають подарунок</label>
+                  <label>Скільки NFT у подарунку</label>
                   <div className="stepper-input">
                     <button type="button" className="btn" onClick={() => setCount(Math.max(1, count - 1))}>−</button>
                     <input type="number" min={1} max={available.length} value={count}
                       onChange={e => setCount(Math.min(available.length, Math.max(1, Number(e.target.value) || 1)))} />
                     <button type="button" className="btn" onClick={() => setCount(Math.min(available.length, count + 1))}>+</button>
                   </div>
-                  <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>Скільки NFT іде в подарунок.</div>
+                  <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>З вільних NFT цієї колекції.</div>
                 </div>
                 {count > 1 && (
                   <div className="field">
