@@ -127,6 +127,7 @@ service : (opt InitArg) -> {
   plans : () -> (variant { Ok : vec PlanQuote; Err : text }) query;
   set_plans : (vec Plan) -> (variant { Ok; Err : text });
   buy_plan : (text, nat64) -> (variant { Ok : Subscription; Err : text });
+  grant_credits : (principal, nat64, nat64, nat32) -> (variant { Ok : Subscription; Err : text });
   subscription_of : (principal) -> (opt Subscription) query;
   purchases_of : (principal) -> (vec PlanPurchase) query;
   consume_mints : (principal, UsageKind, nat64, nat64) -> (variant { Ok : Subscription; Err : text });

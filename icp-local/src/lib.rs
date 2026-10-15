@@ -822,6 +822,33 @@ async fn buy_plan(plan_id: String, max_price_e8s: u64) -> Result<Subscription, S
     Ok(sub)
 }
 
+/// Controller only: credit mints without a purchase (tests, demos, promotions).
+/// Keeps the plan valid for at least `min_days` and allows photos up to 2 MB.
+#[update]
+fn grant_credits(owner: Principal, photo_mints: u64, metadata_mints: u64, min_days: u32) -> Result<Subscription, String> {
+    require_controller()?;
+    let now = ic_cdk::api::time();
+    let key = owner.to_text();
+    let mut sub = SUBSCRIPTIONS.with(|m| m.borrow().get(&key)).unwrap_or(Subscription {
+        owner,
+        plan_id: "grant".into(),
+        photo_mints_left: 0,
+        metadata_mints_left: 0,
+        max_photo_kb: 0,
+        expires_at_ns: now,
+    });
+    if sub.expires_at_ns <= now {
+        sub.photo_mints_left = 0;
+        sub.metadata_mints_left = 0;
+    }
+    sub.photo_mints_left += photo_mints;
+    sub.metadata_mints_left += metadata_mints;
+    sub.max_photo_kb = sub.max_photo_kb.max(2_048);
+    sub.expires_at_ns = sub.expires_at_ns.max(now + min_days as u64 * NS_PER_DAY);
+    SUBSCRIPTIONS.with(|m| m.borrow_mut().insert(key, sub.clone()));
+    Ok(sub)
+}
+
 #[query]
 fn subscription_of(owner: Principal) -> Option<Subscription> {
     SUBSCRIPTIONS.with(|m| m.borrow().get(&owner.to_text()))

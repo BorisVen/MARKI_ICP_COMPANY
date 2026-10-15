@@ -4,7 +4,7 @@ use axum::{
     Extension, Json,
 };
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -37,30 +37,74 @@ fn collection_title_after_sale(title: &str, remaining: usize) -> String {
     title.to_owned()
 }
 
-/// Load the `nfts` array from `marki_wallets/{uid}`.
+// A wallet's NFTs live in `marki_wallets/{uid}.nfts` and, past the first
+// NFTS_PER_DOC, in `marki_wallet_nfts/{uid}_{k}` (k = 1..nftChunks). A Firestore
+// document holds at most 1 MiB and one NFT record is ~1 KB, so a single array
+// would stop saving at ~1000 NFTs. Wallets that never grew keep one document.
+const NFTS_PER_DOC: usize = 400;
+const NFT_CHUNKS: &str = "marki_wallet_nfts";
+
+fn chunk_id(uid: &str, k: u64) -> String {
+    format!("{uid}_{k}")
+}
+
+fn chunk_count(wallet: &Value) -> u64 {
+    wallet.get("nftChunks").and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn nfts_field(doc: &Value) -> Vec<Nft> {
+    doc.get("nfts").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default()
+}
+
+/// All NFTs of a wallet whose main document is already loaded.
+pub(crate) async fn nfts_in_wallet(state: &AppState, uid: &str, wallet: &Value) -> ApiResult<Vec<Nft>> {
+    let mut nfts = nfts_field(wallet);
+    let chunks = chunk_count(wallet);
+    if chunks > 0 {
+        let reads = (1..=chunks).map(|k| async move { state.firestore.get(NFT_CHUNKS, &chunk_id(uid, k)).await });
+        for doc in futures::future::join_all(reads).await {
+            if let Some(doc) = doc.map_err(|e| AppError::Firebase(e.to_string()))? {
+                nfts.extend(nfts_field(&doc));
+            }
+        }
+    }
+    Ok(nfts)
+}
+
+/// Load every NFT of `uid`.
 pub(crate) async fn load_nfts(state: &AppState, uid: &str) -> ApiResult<Vec<Nft>> {
-    let doc = state
+    let wallet = state
         .firestore
         .get("marki_wallets", uid)
         .await
         .map_err(|e| AppError::Firebase(e.to_string()))?
         .unwrap_or_else(|| json!({ "nfts": [] }));
-
-    let nfts: Vec<Nft> = doc
-        .get("nfts")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-
-    Ok(nfts)
+    nfts_in_wallet(state, uid, &wallet).await
 }
 
-/// Persist the `nfts` array back to `marki_wallets/{uid}`.
+/// Persist every NFT of `uid`, splitting them across documents as needed.
 pub(crate) async fn save_nfts(state: &AppState, uid: &str, nfts: &[Nft]) -> ApiResult<()> {
+    let fs = |e: anyhow::Error| AppError::Firebase(e.to_string());
+    let old_chunks = state.firestore.get("marki_wallets", uid).await.map_err(fs)?.map(|w| chunk_count(&w)).unwrap_or(0);
+    let mut parts = nfts.chunks(NFTS_PER_DOC);
+    let first = parts.next().unwrap_or(&[]);
+    let rest: Vec<&[Nft]> = parts.collect();
+    // Extra documents first, then the main one that says how many to read.
+    for (i, part) in rest.iter().enumerate() {
+        state
+            .firestore
+            .set(NFT_CHUNKS, &chunk_id(uid, i as u64 + 1), &json!({ "userId": uid, "nfts": part }))
+            .await
+            .map_err(fs)?;
+    }
     state
         .firestore
-        .update("marki_wallets", uid, &json!({ "nfts": nfts }))
+        .update("marki_wallets", uid, &json!({ "nfts": first, "nftChunks": rest.len() }))
         .await
-        .map_err(|e| AppError::Firebase(e.to_string()))?;
+        .map_err(fs)?;
+    for k in rest.len() as u64 + 1..=old_chunks {
+        let _ = state.firestore.delete(NFT_CHUNKS, &chunk_id(uid, k)).await;
+    }
     Ok(())
 }
 
@@ -156,10 +200,7 @@ pub async fn get_nfts(
         .await
         .map_err(|e| AppError::Firebase(e.to_string()))?
         .unwrap_or_else(|| json!({}));
-    let mut nfts: Vec<Nft> = wallet
-        .get("nfts")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
+    let mut nfts = nfts_in_wallet(&state, &auth.uid, &wallet).await?;
     // Views are counted outside the array; see public::nft_views.
     for n in nfts.iter_mut() {
         n.views = crate::handlers::public::nft_views(&wallet, n);
@@ -711,7 +752,7 @@ pub async fn create_edition_nfts(
         .ok_or_else(|| AppError::BadRequest(
             "Field 'editionCount' must be an integer ≥ 2".into()
         ))?
-        .min(100); // hard cap: 100 editions per request
+        .min(1_000); // hard cap per request (the canister mints up to 1000 at once)
 
     // Fetch owner display name.
     let user_doc  = state.firestore.get("users", &auth.uid).await

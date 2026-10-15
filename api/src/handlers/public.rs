@@ -87,11 +87,6 @@ fn count(doc: &Value, key: &str) -> u64 {
     doc.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
-fn parse_nfts(doc: &Value) -> Vec<Nft> {
-    doc.get("nfts")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default()
-}
 
 /// Passport views live in the wallet's `nftViews` map (nft id -> count), not in
 /// the `nfts` array: a public view must never rewrite the owner's NFT list, or a
@@ -190,7 +185,7 @@ pub async fn get_user_nfts(
         .map_err(|e| AppError::Firebase(e.to_string()))?
         .unwrap_or_else(|| json!({}));
     let nfc_bindings = wallet.get("nfcBindings");
-    let mut nfts: Vec<PublicNft> = parse_nfts(&wallet)
+    let mut nfts: Vec<PublicNft> = crate::handlers::nfts::nfts_in_wallet(state.as_ref(), &uid, &wallet).await?
         .into_iter()
         .map(|nft| PublicNft {
             views: nft_views(&wallet, &nft),
@@ -220,7 +215,7 @@ async fn verified_nft(
         .await
         .map_err(|e| AppError::Firebase(e.to_string()))?
         .unwrap_or_else(|| json!({"nfts": []}));
-    let nft = find_nft(&parse_nfts(&wallet), nft_id, owner_id)
+    let nft = find_nft(&crate::handlers::nfts::nfts_in_wallet(state, owner_id, &wallet).await?, nft_id, owner_id)
         .ok_or_else(|| AppError::NotFound("This QR is not registered by Idenity".into()))?;
     let mut one = [nft];
     crate::handlers::names::refresh_nfts(state, &mut one).await;
@@ -339,7 +334,7 @@ pub async fn view_passport(
         .await
         .map_err(|e| AppError::Firebase(e.to_string()))?
         .unwrap_or_else(|| json!({"nfts": []}));
-    let nft = find_nft(&parse_nfts(&wallet), &nft_id, &owner_id)
+    let nft = find_nft(&crate::handlers::nfts::nfts_in_wallet(&state, &owner_id, &wallet).await?, &nft_id, &owner_id)
         .ok_or_else(|| AppError::NotFound("This QR is not registered by Idenity".into()))?;
     // Field-mask update of the `nftViews` map only; the `nfts` array is untouched.
     let mut views = wallet
@@ -388,7 +383,7 @@ pub async fn analytics(
             }
         })
         .collect();
-    let top_passports = parse_nfts(&wallet)
+    let top_passports = crate::handlers::nfts::nfts_in_wallet(&state, &auth.uid, &wallet).await?
         .into_iter()
         .map(|n| (nft_views(&wallet, &n), n))
         .filter(|(views, _)| *views > 0)

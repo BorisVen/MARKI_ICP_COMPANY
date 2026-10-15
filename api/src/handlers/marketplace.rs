@@ -324,25 +324,11 @@ pub async fn buy_nft_cod(
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 async fn load_nfts_for_user(state: &AppState, uid: &str) -> ApiResult<Vec<Nft>> {
-    let doc = state
-        .firestore
-        .get("marki_wallets", uid)
-        .await
-        .map_err(|e| AppError::Firebase(e.to_string()))?
-        .unwrap_or_else(|| json!({ "nfts": [] }));
-
-    Ok(doc
-        .get("nfts")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default())
+    crate::handlers::nfts::load_nfts(state, uid).await
 }
 
 async fn save_nfts_for_user(state: &AppState, uid: &str, nfts: &[Nft]) -> ApiResult<()> {
-    state
-        .firestore
-        .update("marki_wallets", uid, &json!({ "nfts": nfts }))
-        .await
-        .map_err(|e| AppError::Firebase(e.to_string()))
+    crate::handlers::nfts::save_nfts(state, uid, nfts).await
 }
 
 async fn load_crypto_wallets_for_user(
