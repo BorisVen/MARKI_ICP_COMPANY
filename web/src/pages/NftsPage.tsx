@@ -12,6 +12,7 @@ import {
   apiRegenerateAllQr,
   apiGetMintInfo,
   apiGetNFTs,
+  apiMyGifts,
   apiUpdateNFT,
   type NFT,
 } from '../api';
@@ -86,12 +87,16 @@ export default function NftsPage() {
   const [qrFor, setQrFor] = useState<NFT | null>(null);
   const [gifting, setGifting] = useState<NFT[] | null>(null);
   const [generatingQr, setGeneratingQr] = useState(false);
+  // NFTs waiting in active gift links (sub-collections), so they aren't offered twice.
+  const [reserved, setReserved] = useState<Set<string>>(new Set());
 
   const reload = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setNfts(await apiGetNFTs());
+      const [list, gifts] = await Promise.all([apiGetNFTs(), apiMyGifts().catch(() => null)]);
+      setNfts(list);
+      setReserved(new Set((gifts?.sent ?? []).filter(g => g.status === 'active').flatMap(g => g.remainingNftIds)));
     } catch (e: any) {
       setError(e?.message ?? 'Не вдалося завантажити каталог');
     } finally {
@@ -193,8 +198,10 @@ export default function NftsPage() {
                 action={<button className="btn btn-primary" onClick={() => setMode('create')}><Icon.Plus /> Створити NFT</button>}
               />
             ) : (
+              <>
+              <GiftCollections nfts={nfts.filter(n => n.giftCollection)} reserved={reserved} onSplit={setGifting} />
               <div className="grid grid-3">
-                {nfts.map(n => (
+                {nfts.filter(n => !n.giftCollection).map(n => (
                   <NftCard
                     key={n.id}
                     nft={n}
@@ -205,6 +212,7 @@ export default function NftsPage() {
                   />
                 ))}
               </div>
+              </>
             )
           )}
           {nfts.length > 0 && (
@@ -227,7 +235,45 @@ export default function NftsPage() {
       )}
 
       {qrFor && <QrModal nft={qrFor} onClose={() => setQrFor(null)} />}
-      {gifting && <CreateGiftModal nfts={gifting} onClose={() => setGifting(null)} />}
+      {gifting && <CreateGiftModal nfts={gifting.filter(n => !reserved.has(n.id))} onClose={() => { setGifting(null); reload(); }} />}
+    </div>
+  );
+}
+
+/** Gift collections as one card each: what's free, in sub-collections and already given. */
+function GiftCollections({ nfts, reserved, onSplit }: { nfts: NFT[]; reserved: Set<string>; onSplit: (free: NFT[]) => void }) {
+  if (nfts.length === 0) return null;
+  const groups = new Map<string, NFT[]>();
+  for (const n of nfts) {
+    const key = n.batchId || n.batchName || n.id;
+    groups.set(key, [...(groups.get(key) ?? []), n]);
+  }
+  return (
+    <div className="gift-collections">
+      {[...groups.values()].map(items => {
+        const first = items[0];
+        const free = items.filter(n => !reserved.has(n.id) && !n.forSale);
+        const inParts = items.length - free.length;
+        const total = Math.max(first.batchSize ?? items.length, items.length);
+        const given = total - items.length;
+        return (
+          <div key={first.batchId || first.id} className="card gift-coll">
+            {(first.imageUrl || first.image) && <img src={first.imageUrl || first.image} alt="" />}
+            <div className="gc-body">
+              <div className="gc-name"><span className="badge badge-info">🎁 Подарункова</span> {first.batchName || first.title}</div>
+              <div className="gc-counts">
+                <span><strong>{free.length}</strong> вільно</span>
+                <span><strong>{inParts}</strong> у підколекціях</span>
+                <span><strong>{given}</strong> подаровано</span>
+                <span className="muted">з {total}</span>
+              </div>
+            </div>
+            <button className="btn btn-primary" disabled={free.length === 0} onClick={() => onSplit(free)}>
+              <Icon.Gift /> Нова підколекція
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -425,6 +471,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
         forSale,
         currency,
         creatorPrincipal: principal,
+        giftCollection,
       };
       if (forSale && price) baseMetadata.price = parseFloat(price);
 
@@ -556,7 +603,6 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
 
       if (ICP_MINT_ENABLED) plan.refresh();
       setSuccess(true);
-      if (giftCollection) setNewIds(ids => { openGift(ids); return ids; });
       setUploadProgress('');
     } catch (e: any) {
       console.error('[NFTs] mint failed:', e);
@@ -602,7 +648,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
         <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 16, flexWrap: 'wrap' }}>
           {newIds.length > 0 && !forSale && (
             <button className="btn btn-primary" onClick={() => openGift(newIds)}>
-              <Icon.Gift /> {newIds.length > 1 ? `Подарувати колекцію (${newIds.length})` : 'Подарувати'}
+              <Icon.Gift /> {newIds.length > 1 ? 'Нова підколекція' : 'Подарувати'}
             </button>
           )}
           <button className="btn" onClick={handleReset}>
@@ -610,7 +656,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
           </button>
           <button className="btn" onClick={onDone}>До списку</button>
         </div>
-        {giftNfts && <CreateGiftModal nfts={giftNfts} all onClose={() => setGiftNfts(null)} />}
+        {giftNfts && <CreateGiftModal nfts={giftNfts} onClose={() => setGiftNfts(null)} />}
       </div>
     );
   }
@@ -887,7 +933,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
             <div className="toggle-row">
               <div>
                 <div className="lbl">🎁 Подарункова колекція</div>
-                <div className="sub">Одразу після випуску — посилання й QR: можна розбити на підколекції.</div>
+                <div className="sub">Не продається: роздаєте підколекціями — посилання й QR у розділі NFT.</div>
               </div>
               <div className={`switch ${giftCollection ? 'on' : ''}`} onClick={() => { setGiftCollection(!giftCollection); if (!giftCollection) setForSale(false); }}>
                 <div className="knob" />

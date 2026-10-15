@@ -120,6 +120,8 @@ export type NFT = {
   royalty?: number;
   createdAt?: string;
   batchId?: string;
+  /** Minted as a gift collection: handed out through gift links. */
+  giftCollection?: boolean;
   batchName?: string;
   batchIndex?: number;
   batchSize?: number;

@@ -57,6 +57,9 @@ pub struct Nft {
     /// Ownership chain, oldest first: issuer, then every gift or sale.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owners: Vec<OwnershipRecord>,
+    /// Minted as a gift collection: handed out through gift links, not sold.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gift_collection: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +124,8 @@ pub struct CreateNftRequest {
     /// so 100 copies don't need 100 follow-up updates.
     #[serde(default)]
     pub mint_addresses: Vec<String>,
+    #[serde(default)]
+    pub gift_collection: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -134,6 +139,8 @@ pub struct BatchItemMeta {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchNftInput {
+    #[serde(default)]
+    pub gift_collection: bool,
     pub batch_name: Option<String>,
     pub blockchain: String,
     pub currency: String,

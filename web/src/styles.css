@@ -1840,3 +1840,9 @@ details.soft[open] summary { margin-bottom: 10px; }
 .goods-unit.flag { background: rgba(239,68,68,0.08); }
 .group-share-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; max-height: 260px; overflow-y: auto; text-align: left; }
 .group-share-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; font-size: 13px; }
+.gift-collections { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+.gift-coll { display: flex; align-items: center; gap: 14px; margin: 0 !important; flex-wrap: wrap; }
+.gift-coll img { width: 64px; height: 64px; border-radius: 12px; object-fit: cover; flex: none; }
+.gift-coll .gc-body { flex: 1; min-width: 200px; }
+.gift-coll .gc-name { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.gift-coll .gc-counts { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 6px; font-size: 13px; }

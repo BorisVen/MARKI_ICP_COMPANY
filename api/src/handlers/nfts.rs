@@ -334,6 +334,7 @@ pub async fn create_nft(
         qr_image_url: None,
         gift_from: None,
         gift_id: None,
+        gift_collection: req.gift_collection,
         owners: Vec::new(),
     };
 
@@ -513,6 +514,7 @@ pub async fn batch_create_nfts(
                     qr_image_url: None,
                     gift_from: None,
                     gift_id: None,
+                    gift_collection: shared.gift_collection,
                     owners: Vec::new(),
                 };
                 nfts.push(nft);
@@ -786,6 +788,7 @@ pub async fn create_edition_nfts(
         qr_image_url: None,
         gift_from: None,
         gift_id: None,
+        gift_collection: req.gift_collection,
         owners: Vec::new(),
     };
 
