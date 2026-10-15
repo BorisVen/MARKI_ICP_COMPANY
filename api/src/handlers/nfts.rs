@@ -801,7 +801,8 @@ pub async fn create_edition_nfts(
         edition_ids.push(eid.clone());
         all_nfts.push(Nft {
             id:             eid,
-            title:          format!("{} #{}", req.title, n),
+            // Copies share the name; the token number tells them apart.
+            title:          req.title.clone(),
             edition_number: Some(n),
             master_nft_id:  has_master.then(|| master_id.clone()),
             batch_index:    Some(n),

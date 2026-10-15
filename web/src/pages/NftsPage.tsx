@@ -502,7 +502,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
           await apiCreatePost({
             nftImages: editionIds.map(() => imageUrl),
             walletNftIds: editionIds,
-            title: `${title.trim()} (${editionIds.length}/${numEditions} editions)`,
+            title: title.trim(),
             description: description.trim(),
             tags,
             forSale,
