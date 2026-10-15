@@ -64,6 +64,9 @@ pub struct UserData {
     pub rejection_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ban_reason: Option<String>,
+    /// The user's ICP principal (Plug): where gifted tokens are sent on-chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icp_principal: Option<String>,
 }
 
 /// Public profile fields returned by `GET /api/users/search`.

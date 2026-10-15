@@ -7,6 +7,7 @@ pub mod gifts;
 pub mod gift_requests;
 pub mod goods;
 pub mod names;
+pub mod onchain;
 pub mod marketplace;
 pub mod nfc;
 pub mod notifications;

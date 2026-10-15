@@ -112,6 +112,19 @@ type Pricing = record {
   ledger_fee_e8s : nat64;
 };
 type InitArg = record { ledger : opt principal };
+type TransferArg7 = record {
+  from_subaccount : opt blob;
+  to : Account;
+  token_id : nat;
+  memo : opt blob;
+  created_at_time : opt nat64;
+};
+type TransferError7 = variant {
+  NonExistingTokenId;
+  InvalidRecipient;
+  Unauthorized;
+  GenericError : record { error_code : nat; message : text };
+};
 service : (opt InitArg) -> {
   create_listing : (text, nat64) -> (nat64);
   buy : (nat64) -> (BuyResult);
@@ -141,6 +154,7 @@ service : (opt InitArg) -> {
   icrc7_owner_of : (vec nat) -> (vec opt Account) query;
   icrc7_tokens_of : (Account, opt nat, opt nat) -> (vec nat) query;
   icrc7_token_metadata : (vec nat) -> (vec opt vec record { text; Value }) query;
+  icrc7_transfer : (vec TransferArg7) -> (vec opt variant { Ok : nat; Err : TransferError7 });
   get_token : (nat64) -> (opt Token) query;
   get_image : (nat64) -> (opt blob) query;
   nft_stats : () -> (NftStats) query;

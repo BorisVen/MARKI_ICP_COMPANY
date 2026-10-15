@@ -130,7 +130,22 @@ export interface PaymentsService {
   subscription_of: (owner: Principal) => Promise<[] | [Subscription]>;
   purchases_of: (owner: Principal) => Promise<PlanPurchase[]>;
   pricing: () => Promise<Pricing>;
+  icrc7_owner_of: (ids: bigint[]) => Promise<([] | [Account])[]>;
+  icrc7_transfer: (args: Icrc7TransferArg[]) => Promise<([] | [{ Ok: bigint } | { Err: Icrc7TransferError }])[]>;
 }
+
+export type Icrc7TransferArg = {
+  from_subaccount: [] | [Uint8Array];
+  to: Account;
+  token_id: bigint;
+  memo: [] | [Uint8Array];
+  created_at_time: [] | [bigint];
+};
+export type Icrc7TransferError =
+  | { NonExistingTokenId: null }
+  | { InvalidRecipient: null }
+  | { Unauthorized: null }
+  | { GenericError: { error_code: bigint; message: string } };
 
 export const paymentsIdl: IDLType.InterfaceFactory = ({ IDL }) => {
   const Plan = IDL.Record({
@@ -186,7 +201,23 @@ export const paymentsIdl: IDLType.InterfaceFactory = ({ IDL }) => {
     heap_bytes: IDL.Nat64,
   });
   const res = (t: IDLType.Type) => IDL.Variant({ Ok: t, Err: IDL.Text });
+  const Account7 = IDL.Record({ owner: IDL.Principal, subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)) });
+  const TransferArg7 = IDL.Record({
+    from_subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)),
+    to: Account7,
+    token_id: IDL.Nat,
+    memo: IDL.Opt(IDL.Vec(IDL.Nat8)),
+    created_at_time: IDL.Opt(IDL.Nat64),
+  });
+  const TransferError7 = IDL.Variant({
+    NonExistingTokenId: IDL.Null,
+    InvalidRecipient: IDL.Null,
+    Unauthorized: IDL.Null,
+    GenericError: IDL.Record({ error_code: IDL.Nat, message: IDL.Text }),
+  });
   return IDL.Service({
+    icrc7_owner_of: IDL.Func([IDL.Vec(IDL.Nat)], [IDL.Vec(IDL.Opt(Account7))], ['query']),
+    icrc7_transfer: IDL.Func([IDL.Vec(TransferArg7)], [IDL.Vec(IDL.Opt(IDL.Variant({ Ok: IDL.Nat, Err: TransferError7 })))], []),
     create_upload: IDL.Func([], [res(IDL.Nat64)], []),
     append_chunk: IDL.Func([IDL.Nat64, IDL.Vec(IDL.Nat8)], [res(IDL.Nat64)], []),
     mint_uploaded: IDL.Func([IDL.Nat64, IDL.Text, IDL.Nat32], [res(MintResult)], []),

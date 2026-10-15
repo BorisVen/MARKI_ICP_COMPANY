@@ -96,6 +96,9 @@ struct Settings {
     next_token: u64,
     next_image: u64,
     image_bytes: u64,
+    /// ICRC-7 transfer transaction index. Defaulted for state saved before transfers.
+    #[serde(default)]
+    next_transfer: u64,
 }
 
 impl Default for Settings {
@@ -109,6 +112,7 @@ impl Default for Settings {
             next_token: 0,
             next_image: 0,
             image_bytes: 0,
+            next_transfer: 0,
         }
     }
 }
@@ -1137,6 +1141,79 @@ fn icrc7_token_metadata(ids: Vec<Nat>) -> Vec<Option<Vec<(String, Value)>>> {
         .collect()
 }
 
+// ── ICRC-7 transfers ─────────────────────────────────────────────────────────
+// The owner moves tokens to another principal (e.g. a gift receiver's Plug).
+// Subaccounts aren't tracked: tokens belong to principals.
+
+const MAX_TRANSFERS_PER_CALL: usize = 100;
+
+#[derive(CandidType, Deserialize)]
+struct Icrc7TransferArg {
+    from_subaccount: Option<serde_bytes::ByteBuf>,
+    to: Account,
+    token_id: Nat,
+    memo: Option<serde_bytes::ByteBuf>,
+    created_at_time: Option<u64>,
+}
+
+#[derive(CandidType, Debug, PartialEq)]
+enum Icrc7TransferError {
+    NonExistingTokenId,
+    InvalidRecipient,
+    Unauthorized,
+    GenericError { error_code: Nat, message: String },
+}
+
+/// Moves one token from `from` to `to`; the caller must own it.
+fn transfer_token(from: Principal, to: &Account, token_id: &Nat) -> Result<Nat, Icrc7TransferError> {
+    let id = nat_to_u64(token_id).ok_or(Icrc7TransferError::NonExistingTokenId)?;
+    let mut token = TOKENS.with(|m| m.borrow().get(&id)).ok_or(Icrc7TransferError::NonExistingTokenId)?;
+    if token.owner != from {
+        return Err(Icrc7TransferError::Unauthorized);
+    }
+    if to.owner == Principal::anonymous() || to.owner == from {
+        return Err(Icrc7TransferError::InvalidRecipient);
+    }
+    OWNER_TOKENS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.remove(&owner_key(&from, id));
+        m.insert(owner_key(&to.owner, id), ());
+    });
+    token.owner = to.owner;
+    TOKENS.with(|m| m.borrow_mut().insert(id, token));
+    Ok(Nat::from(update_settings(|s| {
+        let tx = s.next_transfer;
+        s.next_transfer += 1;
+        tx
+    })))
+}
+
+#[update]
+fn icrc7_transfer(args: Vec<Icrc7TransferArg>) -> Vec<Option<Result<Nat, Icrc7TransferError>>> {
+    let caller = ic_cdk::api::msg_caller();
+    if args.len() > MAX_TRANSFERS_PER_CALL {
+        let err = Icrc7TransferError::GenericError {
+            error_code: Nat::from(1u8),
+            message: format!("at most {MAX_TRANSFERS_PER_CALL} transfers per call"),
+        };
+        return args.iter().map(|_| Some(Err(err.clone_generic()))).collect();
+    }
+    args.iter().map(|a| Some(transfer_token(caller, &a.to, &a.token_id))).collect()
+}
+
+impl Icrc7TransferError {
+    fn clone_generic(&self) -> Self {
+        match self {
+            Icrc7TransferError::GenericError { error_code, message } => {
+                Icrc7TransferError::GenericError { error_code: error_code.clone(), message: message.clone() }
+            }
+            Icrc7TransferError::NonExistingTokenId => Icrc7TransferError::NonExistingTokenId,
+            Icrc7TransferError::InvalidRecipient => Icrc7TransferError::InvalidRecipient,
+            Icrc7TransferError::Unauthorized => Icrc7TransferError::Unauthorized,
+        }
+    }
+}
+
 #[query]
 fn get_token(id: u64) -> Option<Token> {
     TOKENS.with(|m| m.borrow().get(&id))
@@ -1244,6 +1321,23 @@ mod tests {
         assert_eq!((t.minted_at_ns, t.edition, t.edition_total), (7, None, None));
         let numbered = roundtrip(Token { edition: Some(5), edition_total: Some(100), ..t });
         assert_eq!((numbered.edition, numbered.edition_total), (Some(5), Some(100)));
+    }
+
+    #[test]
+    fn owner_transfers_a_token_and_others_cannot() {
+        let a = Principal::from_slice(&[1; 29]);
+        let b = Principal::from_slice(&[2; 29]);
+        let ids = insert_tokens(a, vec!["{}".into()], None, 1, false);
+        let id = Nat::from(ids[0]);
+        let to_b = Account { owner: b, subaccount: None };
+        // Someone else can't move it; nor can the owner send it to themselves.
+        assert_eq!(transfer_token(b, &to_b, &id), Err(Icrc7TransferError::Unauthorized));
+        assert_eq!(transfer_token(a, &Account { owner: a, subaccount: None }, &id), Err(Icrc7TransferError::InvalidRecipient));
+        assert!(transfer_token(a, &to_b, &id).is_ok());
+        assert_eq!(TOKENS.with(|m| m.borrow().get(&ids[0])).unwrap().owner, b);
+        assert!(OWNER_TOKENS.with(|m| m.borrow().contains_key(&owner_key(&b, ids[0]))));
+        assert!(!OWNER_TOKENS.with(|m| m.borrow().contains_key(&owner_key(&a, ids[0]))));
+        assert_eq!(transfer_token(a, &to_b, &Nat::from(999_999u64)), Err(Icrc7TransferError::NonExistingTokenId));
     }
 
     #[test]

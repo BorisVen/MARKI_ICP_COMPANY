@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import {
   apiApproveGiftRequest, apiCancelGift, apiDeclineGiftRequest, apiGiftRequests, apiMyGifts, type Gift, type GiftRequest,
 } from '../api';
@@ -8,6 +8,9 @@ import { Icon } from '../icons';
 import { ListSkeleton } from '../Skeleton';
 import { GiftShare } from './CreateGiftModal';
 import { printGiftQrs } from './printGifts';
+
+// ICP code is heavy: load the on-chain card only on this page.
+const OnChainHandover = lazy(() => import('../icp/OnChainHandover'));
 
 const STATUS: Record<Gift['status'], { label: string; tone: string }> = {
   active: { label: 'Активний', tone: 'badge-info' },
@@ -62,6 +65,8 @@ export default function GiftsPage({ hint }: { hint?: string }) {
         </div>
         <button className="btn" onClick={reload} title="Оновити"><Icon.Refresh /></button>
       </div>
+
+      <Suspense fallback={null}><OnChainHandover /></Suspense>
 
       <div className="mode-tabs" role="tablist">
         <button className={`mode-tab ${tab === 'sent' ? 'active' : ''}`} onClick={() => setTab('sent')}>

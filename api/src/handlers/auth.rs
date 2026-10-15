@@ -124,6 +124,7 @@ pub async fn register(
         approval_status: None,
         rejection_reason: None,
         ban_reason: None,
+        icp_principal: None,
     };
 
     let user_value = serde_json::to_value(&user).map_err(|e| AppError::Internal(e.into()))?;
