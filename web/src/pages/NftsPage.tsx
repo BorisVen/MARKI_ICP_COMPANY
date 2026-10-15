@@ -240,6 +240,24 @@ export default function NftsPage() {
   );
 }
 
+/** A printable sheet with each NFT's passport QR (visitors can ask for a gift-collection NFT there). */
+async function printPassportQrs(items: NFT[]) {
+  const base = (import.meta.env.VITE_QR_BASE_URL as string) || 'https://borisven.github.io/MARKI_ICP/';
+  const url = (n: NFT) => `${base}?nft=${encodeURIComponent(n.id)}${n.ownerId ? `&owner=${encodeURIComponent(n.ownerId)}` : ''}`;
+  const qrs = await Promise.all(items.map(n => QRCode.toDataURL(url(n), { width: 240, margin: 1, errorCorrectionLevel: 'M' })));
+  const esc = (t: string) => t.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
+  const cards = items.map((n, i) => `<div class="l"><img src="${qrs[i]}"><b>${esc(n.title)}</b><span>${n.batchIndex ? `№ ${n.batchIndex}` : ''}</span></div>`).join('');
+  const w = window.open('', '_blank');
+  if (!w) { alert('Дозволь спливні вікна, щоб надрукувати QR.'); return; }
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>QR паспортів · ${esc(items[0]?.batchName || items[0]?.title || '')}</title>
+    <style>@page { size: A4; margin: 10mm; } body { font-family: -apple-system, system-ui, sans-serif; margin: 0; }
+    .g { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6mm; }
+    .l { border: 1px dashed #bbb; border-radius: 3mm; padding: 3mm; text-align: center; break-inside: avoid; display: flex; flex-direction: column; gap: 1mm; }
+    .l img { width: 100%; max-width: 38mm; margin: 0 auto; } .l b { font-size: 9pt; } .l span { font-size: 8pt; color: #666; }</style>
+    </head><body><div class="g">${cards}</div><script>window.onload = () => window.print();</script></body></html>`);
+  w.document.close();
+}
+
 /** Gift collections as one card each: what's free, in sub-collections and already given. */
 function GiftCollections({ nfts, reserved, onSplit }: { nfts: NFT[]; reserved: Set<string>; onSplit: (free: NFT[]) => void }) {
   if (nfts.length === 0) return null;
@@ -268,9 +286,14 @@ function GiftCollections({ nfts, reserved, onSplit }: { nfts: NFT[]; reserved: S
                 <span className="muted">з {total}</span>
               </div>
             </div>
-            <button className="btn btn-primary" disabled={free.length === 0} onClick={() => onSplit(free)}>
-              <Icon.Gift /> Нова підколекція
-            </button>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn" disabled={free.length === 0} onClick={() => printPassportQrs(free)} title="QR на кожен NFT: паспорт + «Запросити подарунок»">
+                <Icon.QrCode /> QR паспортів
+              </button>
+              <button className="btn btn-primary" disabled={free.length === 0} onClick={() => onSplit(free)}>
+                <Icon.Gift /> Нова підколекція
+              </button>
+            </div>
           </div>
         );
       })}

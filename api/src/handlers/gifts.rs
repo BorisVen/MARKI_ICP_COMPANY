@@ -33,7 +33,7 @@ const MAX_MESSAGE: usize = 280;
 /// A gift collection splits into at most this many links / QR codes.
 const MAX_PARTS: usize = 100;
 
-static CLAIM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+pub(crate) static CLAIM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,7 +142,7 @@ fn new_code() -> String {
     Uuid::new_v4().simple().to_string()[..16].to_owned()
 }
 
-fn text(v: &Value, key: &str) -> String {
+pub(crate) fn text(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or_default().to_owned()
 }
 
@@ -165,7 +165,7 @@ async fn save_gift(state: &AppState, gift: &Gift) -> ApiResult<()> {
         .map_err(|e| AppError::Firebase(e.to_string()))
 }
 
-async fn user_doc(state: &AppState, uid: &str) -> ApiResult<Value> {
+pub(crate) async fn user_doc(state: &AppState, uid: &str) -> ApiResult<Value> {
     Ok(state
         .firestore
         .get("users", uid)
@@ -174,7 +174,7 @@ async fn user_doc(state: &AppState, uid: &str) -> ApiResult<Value> {
         .unwrap_or_else(|| json!({})))
 }
 
-async fn notify(state: &AppState, user_id: &str, title: String, text: String, nft_title: &str) {
+pub(crate) async fn notify(state: &AppState, user_id: &str, title: String, text: String, nft_title: &str) {
     let id = Uuid::new_v4().to_string();
     let doc = json!({
         "id": id,
@@ -192,7 +192,7 @@ async fn notify(state: &AppState, user_id: &str, title: String, text: String, nf
 }
 
 /// NFT ids already promised in another active gift of this owner.
-async fn reserved_ids(state: &AppState, owner: &str) -> ApiResult<Vec<String>> {
+pub(crate) async fn reserved_ids(state: &AppState, owner: &str) -> ApiResult<Vec<String>> {
     let docs = state
         .firestore
         .query("gifts", vec![QueryFilter::equal("ownerId", owner.to_owned())], None, None)

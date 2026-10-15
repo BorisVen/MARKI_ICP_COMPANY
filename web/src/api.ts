@@ -614,3 +614,28 @@ export const apiClearGoodsFlag = (batchId: string, serial: number) =>
   del<GoodsBatch>(`/api/goods/batches/${encodeURIComponent(batchId)}/units/${serial}/flag`);
 export const apiAddGoodsEvent = (id: string, body: { kind: GoodsEventKind; location?: string; note?: string }) =>
   post<GoodsBatch>(`/api/goods/batches/${encodeURIComponent(id)}/events`, body);
+
+// ── Gift requests: ask the owner for a gift-collection NFT ──────────────────
+
+export type GiftRequest = {
+  id: string;
+  ownerId: string;
+  nftId: string;
+  nftTitle: string;
+  nftImage: string;
+  requesterId: string;
+  requesterName: string;
+  requesterUsername: string;
+  /** YYYY-MM-DD */
+  boughtOn: string;
+  boughtAt: string;
+  comment: string;
+  status: 'pending' | 'approved' | 'declined';
+  createdAt: string;
+  decidedAt?: string;
+};
+export const apiCreateGiftRequest = (d: { ownerId: string; nftId: string; boughtOn: string; boughtAt?: string; comment?: string }) =>
+  post<GiftRequest>('/api/gift-requests', d);
+export const apiGiftRequests = () => get<{ incoming: GiftRequest[]; outgoing: GiftRequest[] }>('/api/gift-requests');
+export const apiApproveGiftRequest = (id: string) => post<GiftRequest>(`/api/gift-requests/${encodeURIComponent(id)}/approve`);
+export const apiDeclineGiftRequest = (id: string) => post<GiftRequest>(`/api/gift-requests/${encodeURIComponent(id)}/decline`);

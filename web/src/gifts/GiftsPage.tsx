@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { apiCancelGift, apiMyGifts, type Gift } from '../api';
+import {
+  apiApproveGiftRequest, apiCancelGift, apiDeclineGiftRequest, apiGiftRequests, apiMyGifts, type Gift, type GiftRequest,
+} from '../api';
 import EmptyState from '../EmptyState';
 import { fmtAgo, fmtDateTime } from '../format';
 import { Icon } from '../icons';
@@ -15,7 +17,8 @@ const STATUS: Record<Gift['status'], { label: string; tone: string }> = {
 
 /** Gifts I sent (with who claimed what and when) and gifts I received. */
 export default function GiftsPage({ hint }: { hint?: string }) {
-  const [tab, setTab] = useState<'sent' | 'received'>('sent');
+  const [tab, setTab] = useState<'sent' | 'received' | 'requests'>('sent');
+  const [requests, setRequests] = useState<{ incoming: GiftRequest[]; outgoing: GiftRequest[] } | null>(null);
   const [data, setData] = useState<{ sent: Gift[]; received: Gift[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState<Gift | null>(null);
@@ -37,7 +40,18 @@ export default function GiftsPage({ hint }: { hint?: string }) {
     try { await apiCancelGift(g.id); await reload(); } catch (e: any) { alert(e?.message ?? 'Не вдалося скасувати'); }
   };
 
-  const list = data ? data[tab] : null;
+  const list = data && tab !== 'requests' ? data[tab] : null;
+  const pending = requests?.incoming.filter(r => r.status === 'pending').length ?? 0;
+
+  useEffect(() => { apiGiftRequests().then(setRequests).catch(() => setRequests({ incoming: [], outgoing: [] })); }, []);
+  const decide = async (r: GiftRequest, give: boolean) => {
+    if (give && !confirm(`Видати «${r.nftTitle}» користувачу ${r.requesterName}?`)) return;
+    try {
+      await (give ? apiApproveGiftRequest(r.id) : apiDeclineGiftRequest(r.id));
+      setRequests(await apiGiftRequests());
+      if (give) reload();
+    } catch (e: any) { alert(e?.message ?? 'Не вдалося'); }
+  };
 
   return (
     <div>
@@ -53,6 +67,9 @@ export default function GiftsPage({ hint }: { hint?: string }) {
         <button className={`mode-tab ${tab === 'sent' ? 'active' : ''}`} onClick={() => setTab('sent')}>
           Надіслані {data && data.sent.length > 0 && <span className="pill">{data.sent.length}</span>}
         </button>
+        <button className={`mode-tab ${tab === 'requests' ? 'active' : ''}`} onClick={() => setTab('requests')}>
+          Запити {pending > 0 && <span className="pill">{pending}</span>}
+        </button>
         <button className={`mode-tab ${tab === 'received' ? 'active' : ''}`} onClick={() => setTab('received')}>
           Отримані {data && data.received.length > 0 && <span className="pill">{data.received.length}</span>}
         </button>
@@ -60,7 +77,9 @@ export default function GiftsPage({ hint }: { hint?: string }) {
 
       {error && <div className="notice notice-info">{error}</div>}
 
-      {!list ? <ListSkeleton /> : list.length === 0 ? (
+      {tab === 'requests' ? (
+        <RequestsTab data={requests} onDecide={decide} />
+      ) : !list ? <ListSkeleton /> : list.length === 0 ? (
         <EmptyState
           icon="🎁"
           title={tab === 'sent' ? 'Ти ще нічого не дарував(ла)' : 'Подарунків поки немає'}
@@ -197,6 +216,59 @@ function ReceivedGift({ gift: g }: { gift: Gift }) {
           {g.message && <p style={{ fontSize: 13, margin: '6px 0 0' }}>«{g.message}»</p>}
         </div>
       </div>
+    </div>
+  );
+}
+
+const REQ_STATUS: Record<GiftRequest['status'], { label: string; tone: string }> = {
+  pending: { label: 'Очікує', tone: 'badge-pending' },
+  approved: { label: 'Видано', tone: 'badge-success' },
+  declined: { label: 'Відхилено', tone: 'badge-muted' },
+};
+
+/** Requests for gift-collection NFTs: give or decline by hand. */
+function RequestsTab({ data, onDecide }: { data: { incoming: GiftRequest[]; outgoing: GiftRequest[] } | null; onDecide: (r: GiftRequest, give: boolean) => void }) {
+  if (!data) return <ListSkeleton />;
+  if (data.incoming.length === 0 && data.outgoing.length === 0) {
+    return <EmptyState icon="🙋" title="Запитів поки немає" text="Коли хтось відскануює QR подарункового NFT і запросить його, запит з’явиться тут." />;
+  }
+  return (
+    <div className="order-list">
+      {data.incoming.map(r => (
+        <div key={r.id} className="card order-card gift-card">
+          <div className="oc-head">
+            <div style={{ display: 'flex', gap: 12, minWidth: 0 }}>
+              {r.nftImage && <img src={r.nftImage} alt="" className="gift-thumb" />}
+              <div style={{ minWidth: 0 }}>
+                <div className="oc-title">{r.requesterName || 'Користувач Marki'} {r.requesterUsername && <span className="muted">@{r.requesterUsername}</span>}</div>
+                <div className="muted" style={{ fontSize: 12 }}>просить «{r.nftTitle}» · {fmtAgo(r.createdAt)}</div>
+              </div>
+            </div>
+            <span className={`badge ${REQ_STATUS[r.status].tone}`}>{REQ_STATUS[r.status].label}</span>
+          </div>
+          <div className="req-facts">
+            <span>🗓 Купив: <strong>{r.boughtOn}</strong></span>
+            {r.boughtAt && <span>📍 {r.boughtAt}</span>}
+          </div>
+          {r.comment && <p style={{ fontSize: 13, margin: '6px 0 0' }}>«{r.comment}»</p>}
+          {r.status === 'pending' && (
+            <div className="card-actions">
+              <button className="btn btn-primary" onClick={() => onDecide(r, true)}><Icon.Gift /> Видати</button>
+              <button className="btn ghost-danger" onClick={() => onDecide(r, false)}>Відхилити</button>
+            </div>
+          )}
+        </div>
+      ))}
+      {data.outgoing.length > 0 && <div className="muted" style={{ fontSize: 12, margin: '8px 0 0' }}>Мої запити</div>}
+      {data.outgoing.map(r => (
+        <div key={r.id} className="card order-card gift-card">
+          <div className="oc-head">
+            <div className="oc-title">«{r.nftTitle}»</div>
+            <span className={`badge ${REQ_STATUS[r.status].tone}`}>{REQ_STATUS[r.status].label}</span>
+          </div>
+          <div className="muted" style={{ fontSize: 12 }}>Надіслано {fmtDateTime(r.createdAt)}</div>
+        </div>
+      ))}
     </div>
   );
 }

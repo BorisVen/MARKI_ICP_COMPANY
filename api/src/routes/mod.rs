@@ -7,7 +7,7 @@ use axum::{
 use std::sync::Arc;
 
 use crate::{
-    handlers::{admin, ai, auth, cod_orders, deliveries, gifts, goods, marketplace, nfc, notifications, nfts, posts, profile, public, users, wallets},
+    handlers::{admin, ai, auth, cod_orders, deliveries, gift_requests, gifts, goods, marketplace, nfc, notifications, nfts, posts, profile, public, users, wallets},
     middleware::auth::auth_middleware,
     AppState,
 };
@@ -80,6 +80,9 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/gifts", get(gifts::my_gifts))
         .route("/gifts", post(gifts::create_gift))
         .route("/gifts/split", post(gifts::create_gift_group))
+        .route("/gift-requests", get(gift_requests::mine).post(gift_requests::create))
+        .route("/gift-requests/:id/approve", post(gift_requests::approve))
+        .route("/gift-requests/:id/decline", post(gift_requests::decline))
         .route("/gifts/:code", delete(gifts::cancel_gift))
         .route("/gifts/:code/claim", post(gifts::claim_gift))
         // Goods authenticity (products → batches → units)

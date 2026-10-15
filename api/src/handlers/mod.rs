@@ -4,6 +4,7 @@ pub mod auth;
 pub mod cod_orders;
 pub mod deliveries;
 pub mod gifts;
+pub mod gift_requests;
 pub mod goods;
 pub mod names;
 pub mod marketplace;
