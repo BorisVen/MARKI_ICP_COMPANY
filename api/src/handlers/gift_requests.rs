@@ -168,6 +168,21 @@ pub async fn mine(
     Ok(Json(MyRequests { incoming: incoming?, outgoing: outgoing? }))
 }
 
+/// Index of the NFT to give for a request: the requested one when it is free,
+/// else a free copy of the same collection (not in a gift link, not on sale).
+fn pick_copy(wallet: &[crate::models::Nft], requested: &str, reserved: &[String]) -> Option<usize> {
+    let free = |n: &crate::models::Nft| !reserved.contains(&n.id) && !n.for_sale;
+    if let Some(i) = wallet.iter().position(|n| n.id == requested && free(n)) {
+        return Some(i);
+    }
+    let original = wallet.iter().find(|n| n.id == requested);
+    let same = |n: &crate::models::Nft| match original {
+        Some(o) => o.batch_id.is_some() && n.batch_id == o.batch_id || o.batch_id.is_none() && o.batch_name.is_some() && n.batch_name == o.batch_name,
+        None => false,
+    };
+    wallet.iter().position(|n| n.gift_collection && free(n) && same(n))
+}
+
 /// `POST /api/gift-requests/:id/approve` — give the NFT to the requester.
 pub async fn approve(
     State(state): State<Arc<AppState>>,
@@ -182,14 +197,14 @@ pub async fn approve(
     if request.status != "pending" {
         return Err(AppError::Conflict("На цей запит уже відповіли".into()));
     }
-    if reserved_ids(&state, &auth.uid).await?.contains(&request.nft_id) {
-        return Err(AppError::Conflict("Цей NFT чекає в посиланні-подарунку — скасуйте посилання або оберіть інший".into()));
-    }
-
+    let reserved = reserved_ids(&state, &auth.uid).await?;
     let mut owner_wallet = load_nfts(&state, &auth.uid).await?;
-    let pos = owner_wallet.iter().position(|n| n.id == request.nft_id)
-        .ok_or_else(|| AppError::Conflict("Цей NFT уже передано".into()))?;
+    // Copies of a collection are interchangeable: if the scanned one waits in a
+    // gift link (or is gone), give any free copy of the same collection instead.
+    let pos = pick_copy(&owner_wallet, &request.nft_id, &reserved)
+        .ok_or_else(|| AppError::Conflict("Усі NFT цієї колекції вже в посиланнях-подарунках або передані — скасуйте одне посилання".into()))?;
     let source = owner_wallet.remove(pos);
+    request.nft_id = source.id.clone();
     let owner = user_doc(&state, &auth.uid).await?;
     let owner_name = Some(text(&owner, "companyName")).filter(|n| !n.is_empty()).unwrap_or_else(|| text(&owner, "name"));
     let now = Utc::now().to_rfc3339();
@@ -258,4 +273,27 @@ pub async fn decline(
     notify(&state, &request.requester_id, "Запит на подарунок відхилено".into(),
         format!("Власник не видав «{}»", request.nft_title), &request.nft_title).await;
     Ok(Json(request))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_copy;
+
+    fn nft(id: &str, batch: &str) -> crate::models::Nft {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": "MARKI IDENTITY", "description": "", "image": "", "category": null,
+            "blockchain": "icp", "royalty": 0.0, "ownerId": "o", "ownerName": "o", "price": null,
+            "currency": null, "createdAt": "", "batchId": batch, "giftCollection": true
+        })).unwrap()
+    }
+
+    #[test]
+    fn a_reserved_copy_is_swapped_for_a_free_one() {
+        let w = vec![nft("a", "b1"), nft("b", "b1"), nft("x", "b2")];
+        assert_eq!(pick_copy(&w, "a", &[]), Some(0));
+        // "a" waits in a gift link: give "b" from the same collection.
+        assert_eq!(pick_copy(&w, "a", &["a".into()]), Some(1));
+        // Nothing free in that collection (the other one isn't a copy).
+        assert_eq!(pick_copy(&w, "a", &["a".into(), "b".into()]), None);
+    }
 }
