@@ -9,7 +9,7 @@
 //! Env: `WFP_MERCHANT`, `WFP_SECRET` (default: WayForPay's public test merchant),
 //! `WFP_DOMAIN`, `BILLING_PRICE_UAH` (default 1 while testing), `PUBLIC_API_URL`.
 
-use axum::{body::Bytes, extract::{Path, State}, response::Redirect, Extension, Json};
+use axum::{body::Bytes, extract::{Path, State}, response::{Html, IntoResponse, Redirect, Response}, Extension, Json};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use md5::Md5;
@@ -67,6 +67,9 @@ pub struct CheckoutRequest {
     /// Where WayForPay sends the buyer back.
     #[serde(default)]
     pub return_url: Option<String>,
+    /// Paid from the phone app (see `pay_page` and `back_to_app`).
+    #[serde(default)]
+    pub app: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,15 +101,6 @@ pub async fn checkout(
     let signature = sign(&[&merchant, &domain, &id, &date, &amount, "UAH", &product, "1", &amount], &secret());
     let api = env("PUBLIC_API_URL", "https://idenity.onrender.com");
 
-    let mut order = json!({
-        "id": id, "uid": auth.uid, "planId": plan_id, "principal": req.principal.trim(),
-        "amount": amount, "currency": "UAH", "status": "pending", "credited": false,
-        "testMode": test_mode(), "createdAt": Utc::now().to_rfc3339(),
-        "returnTo": req.return_url.as_deref().filter(|u| u.starts_with("https://")),
-    });
-    log_line(&mut order, format!("Створено замовлення: тариф «{plan_name}», {amount} UAH{}", if test_mode() { " (тестовий режим)" } else { "" }));
-    state.firestore.set(ORDERS, &id, &order).await.map_err(fs)?;
-
     let fields = vec![
         ("merchantAccount".into(), merchant),
         ("merchantAuthType".into(), "SimpleSignature".into()),
@@ -119,12 +113,24 @@ pub async fn checkout(
         ("currency".into(), "UAH".into()),
         ("productName[]".into(), product),
         ("productCount[]".into(), "1".into()),
-        ("productPrice[]".into(), amount),
+        ("productPrice[]".into(), amount.clone()),
         ("serviceUrl".into(), format!("{api}/api/public/billing/wayforpay")),
         ("language".into(), "UA".into()),
         // WayForPay POSTs the buyer back; static sites refuse POST, so bounce via the API.
         ("returnUrl".into(), format!("{api}/api/public/billing/return/{id}")),
     ];
+    let mut order = json!({
+        "id": id, "uid": auth.uid, "planId": plan_id, "principal": req.principal.trim(),
+        "amount": amount, "currency": "UAH", "status": "pending", "credited": false,
+        "testMode": test_mode(), "createdAt": Utc::now().to_rfc3339(),
+        "returnTo": req.return_url.as_deref().filter(|u| u.starts_with("https://")),
+        // Paid from the phone app: WayForPay's page opens in a browser tab, which then hands back to the app.
+        "app": req.app,
+        "form": fields.iter().map(|(n, v)| json!({ "n": n, "v": v })).collect::<Vec<_>>(),
+    });
+    log_line(&mut order, format!("Створено замовлення: тариф «{plan_name}», {amount} UAH{}", if test_mode() { " (тестовий режим)" } else { "" }));
+    state.firestore.set(ORDERS, &id, &order).await.map_err(fs)?;
+
     Ok(Json(Checkout { order_id: id, url: "https://secure.wayforpay.com/pay".into(), fields, test_mode: test_mode() }))
 }
 
@@ -183,13 +189,48 @@ pub async fn wayforpay_notice(State(state): State<Arc<AppState>>, body: Bytes) -
     Ok(Json(json!({ "orderReference": id, "status": "accept", "time": time, "signature": reply_sig })))
 }
 
-/// `GET|POST /api/public/billing/return/:id` — send the buyer back to the app page they paid from.
-pub async fn back_to_app(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Redirect {
-    let to = state.firestore.get(ORDERS, &id).await.ok().flatten()
-        .and_then(|o| o["returnTo"].as_str().map(str::to_owned))
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn page(title: &str, body: &str) -> Html<String> {
+    Html(format!(r#"<!doctype html><html lang="uk"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title><style>body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0b0f14;color:#e6edf5;font:16px system-ui,sans-serif;text-align:center}}
+main{{padding:24px;max-width:420px}}a,button{{display:block;margin:18px auto 0;padding:14px 22px;border-radius:12px;border:0;background:#4f8cff;color:#fff;font:600 16px system-ui;text-decoration:none}}p{{color:#8a99ad}}</style></head>
+<body><main>{body}</main></body></html>"#))
+}
+
+/// `GET /api/public/billing/pay/:id` — WayForPay's payment form for an app order,
+/// so the app can open the payment as a plain link in a browser tab.
+pub async fn pay_page(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Html<String> {
+    let order = state.firestore.get(ORDERS, &id).await.ok().flatten();
+    let Some(order) = order.filter(|o| o["status"] == "pending") else {
+        return page("Marki", "<h2>Замовлення не знайдено</h2><p>Поверніться в застосунок і спробуйте ще раз.</p>");
+    };
+    let inputs: String = order["form"].as_array().into_iter().flatten()
+        .map(|f| format!(r#"<input type="hidden" name="{}" value="{}">"#, esc(f["n"].as_str().unwrap_or_default()), esc(f["v"].as_str().unwrap_or_default())))
+        .collect();
+    page("Оплата · Marki", &format!(r#"<h2>Переходимо до оплати…</h2><form id="f" method="post" action="https://secure.wayforpay.com/pay" accept-charset="utf-8">{inputs}<button>Оплатити</button></form>
+<script>document.getElementById('f').submit()</script>"#))
+}
+
+/// `GET|POST /api/public/billing/return/:id` — after the payment: back to the app
+/// for app orders (with the website as fallback), otherwise to the web page paid from.
+pub async fn back_to_app(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let order = state.firestore.get(ORDERS, &id).await.ok().flatten();
+    let web = order.as_ref().and_then(|o| o["returnTo"].as_str().map(str::to_owned))
         .unwrap_or_else(|| "https://borisven.github.io/MARKI_ICP/".into());
-    let sep = if to.contains('?') { '&' } else { '?' };
-    Redirect::to(&format!("{to}{sep}paid={}", urlencoding::encode(&id)))
+    let sep = if web.contains('?') { '&' } else { '?' };
+    let web = format!("{web}{sep}paid={}", urlencoding::encode(&id));
+    if order.as_ref().is_some_and(|o| o["app"] == true) {
+        let intent = format!(
+            "intent://paid?order={}#Intent;scheme=marki;package=com.identity.app;S.browser_fallback_url={};end",
+            urlencoding::encode(&id), urlencoding::encode(&web),
+        );
+        return page("Marki", &format!(r#"<h2>Оплату оброблено ✅</h2><p>Результат уже в застосунку Marki.</p><a href="{0}">Повернутися в Marki</a>
+<script>location.href={1:?}</script>"#, esc(&intent), intent)).into_response();
+    }
+    Redirect::to(&web).into_response()
 }
 
 /// `GET /api/billing/orders` — my card orders with their logs, newest first.
@@ -263,5 +304,25 @@ mod live {
         let after = db.get(ORDERS, id).await.unwrap().unwrap();
         println!("credited: {}", after["credited"]);
         for l in after["log"].as_array().unwrap() { println!("  {}", l["text"]); }
+    }
+}
+
+#[cfg(test)]
+mod orders_live {
+    use super::*;
+    use crate::services::{FirestoreClient, GoogleAuthService};
+
+    /// Live: card orders of `BILLING_UID`. `cargo test orders_of_live -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn orders_of_live() {
+        dotenvy::dotenv().ok();
+        let config = crate::config::Config::from_env().unwrap();
+        let db = FirestoreClient::new(config.clone(), Arc::new(GoogleAuthService::new(config).unwrap()));
+        let uid = std::env::var("BILLING_UID").unwrap();
+        for o in db.query(ORDERS, vec![QueryFilter::equal("uid", uid)], None, None).await.unwrap() {
+            println!("{} {} {} credited={} principal={} return={}", o["createdAt"], o["id"], o["status"], o["credited"], o["principal"], o["returnTo"]);
+            for l in o["log"].as_array().into_iter().flatten() { println!("   {}", l["text"]); }
+        }
     }
 }
