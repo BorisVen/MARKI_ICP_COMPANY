@@ -213,3 +213,51 @@ pub async fn withdraw(
     let moved = res.iter().filter(|r| r.is_ok()).count();
     Ok(Json(json!({ "moved": moved, "total": ids.len() })))
 }
+
+const WALLET_KEYS: &str = "marki_wallet_keys";
+
+/// `GET /api/me/icp-wallet` — the seed of the user's built-in Marki wallet.
+///
+/// Phones have no Plug, so the app signs canister calls (plans, mints) with an
+/// Ed25519 key made from this seed. One seed per Marki account, the same on
+/// every device; its tokens still go to Marki custody.
+pub async fn wallet_seed(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthenticatedUser>,
+) -> ApiResult<Json<Value>> {
+    if let Some(doc) = state.firestore.get(WALLET_KEYS, &auth.uid).await.map_err(fs)? {
+        if let Some(seed) = doc["seed"].as_str() {
+            return Ok(Json(json!({ "seed": seed })));
+        }
+    }
+    let mut bytes = [0u8; 32];
+    bytes[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    bytes[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let seed = hex::encode(bytes);
+    state.firestore.set(WALLET_KEYS, &auth.uid, &json!({ "seed": seed, "createdAt": chrono::Utc::now().to_rfc3339() }))
+        .await.map_err(fs)?;
+    Ok(Json(json!({ "seed": seed })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PushTokenRequest {
+    pub token: String,
+}
+
+/// `PUT /api/me/push-token` — this phone wants push notifications.
+pub async fn register_push_token(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthenticatedUser>,
+    Json(req): Json<PushTokenRequest>,
+) -> ApiResult<StatusCode> {
+    let token = req.token.trim().to_owned();
+    if token.len() < 20 || token.len() > 4096 {
+        return Err(AppError::BadRequest("bad push token".into()));
+    }
+    let mut tokens = crate::services::push::tokens_of(&state.firestore, &auth.uid).await;
+    tokens.retain(|t| *t != token);
+    tokens.push(token);
+    let keep = tokens.len().saturating_sub(10);
+    state.firestore.set(crate::services::push::TOKENS, &auth.uid, &json!({ "tokens": &tokens[keep..] })).await.map_err(fs)?;
+    Ok(StatusCode::NO_CONTENT)
+}

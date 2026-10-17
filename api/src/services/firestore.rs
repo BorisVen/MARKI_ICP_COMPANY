@@ -7,6 +7,7 @@ use super::google_auth::GoogleAuthService;
 
 // ── Firestore client ──────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct FirestoreClient {
     http: reqwest::Client,
     project_id: String,
@@ -65,6 +66,29 @@ impl FirestoreClient {
 
     /// Write (create or overwrite) a document at a known ID.
     pub async fn set(&self, collection: &str, doc_id: &str, data: &Value) -> Result<()> {
+        self.set_raw(collection, doc_id, data).await?;
+        // Every in-app notification also goes to the owner's phone.
+        if collection == "notifications" {
+            let (db, doc) = (self.clone(), data.clone());
+            tokio::spawn(async move { super::push::send(&db, &doc).await });
+        }
+        Ok(())
+    }
+
+    /// Sends one FCM v1 message (`{"message": …}`).
+    pub async fn fcm_send(&self, message: &Value) -> Result<()> {
+        let token = self.token().await?;
+        let url = format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", self.project_id);
+        let resp = self.http.post(&url).bearer_auth(&token).json(message).send().await.context("FCM request failed")?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("FCM error: {body}"));
+        }
+        Ok(())
+    }
+
+    /// Writes a document without side effects (see `set`).
+    pub async fn set_raw(&self, collection: &str, doc_id: &str, data: &Value) -> Result<()> {
         let token = self.token().await?;
         let url = format!("{}/{}/{}", self.base_url(), collection, doc_id);
 

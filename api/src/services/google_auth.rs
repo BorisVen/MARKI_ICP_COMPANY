@@ -10,7 +10,8 @@ use crate::config::Config;
 /// Google OAuth2 scopes required by the backend.
 const SCOPES: &str = concat!(
     "https://www.googleapis.com/auth/datastore ",
-    "https://www.googleapis.com/auth/devstorage.full_control"
+    "https://www.googleapis.com/auth/devstorage.full_control ",
+    "https://www.googleapis.com/auth/firebase.messaging"
 );
 
 // ── Internal types ────────────────────────────────────────────────────────────

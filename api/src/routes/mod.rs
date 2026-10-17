@@ -82,6 +82,8 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/gifts", post(gifts::create_gift))
         .route("/gifts/split", post(gifts::create_gift_group))
         .route("/me/icp-principal", put(onchain::link_principal))
+        .route("/me/icp-wallet", get(onchain::wallet_seed))
+        .route("/me/push-token", put(onchain::register_push_token))
         .route("/onchain/pending", get(onchain::pending))
         .route("/billing/checkout", post(billing::checkout))
         .route("/billing/orders", get(billing::my_orders))
