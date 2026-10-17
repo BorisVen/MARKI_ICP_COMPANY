@@ -128,18 +128,12 @@ pub async fn register(
     };
 
     let user_value = serde_json::to_value(&user).map_err(|e| AppError::Internal(e.into()))?;
-    state
-        .firestore
-        .set("users", &body.uid, &user_value)
-        .await
-        .map_err(|e| AppError::Firebase(e.to_string()))?;
 
-    // Create Marki wallet.
+    // Marki wallet plus empty NFT / crypto-wallet documents.
     let mut balance = HashMap::new();
     balance.insert("ICP".to_owned(), 0.0_f64);
     balance.insert("POLYGON".to_owned(), 0.0_f64);
     balance.insert("SOLANA".to_owned(), 0.0_f64);
-
     let wallet = MarkiWallet {
         address: generate_wallet_address(),
         recovery_phrase: generate_recovery_phrase(),
@@ -148,35 +142,24 @@ pub async fn register(
     };
     let wallet_value =
         serde_json::to_value(&wallet).map_err(|e| AppError::Internal(e.into()))?;
-    state
-        .firestore
-        .set("wallets", &body.uid, &wallet_value)
-        .await
-        .map_err(|e| AppError::Firebase(e.to_string()))?;
+    let nfts_doc = serde_json::json!({ "userId": body.uid, "nfts": [], "createdAt": now });
+    let crypto_doc = serde_json::json!({ "userId": body.uid, "wallets": [], "createdAt": now });
 
-    // Bootstrap empty NFT and crypto-wallet documents.
-    state
-        .firestore
-        .set(
-            "marki_wallets",
-            &body.uid,
-            &serde_json::json!({ "userId": body.uid, "nfts": [], "createdAt": now }),
-        )
-        .await
-        .map_err(|e| AppError::Firebase(e.to_string()))?;
+    // Independent documents: write them side by side (sign-up waited ~2 s doing it in turn).
+    let fs = &state.firestore;
+    tokio::try_join!(
+        fs.set("users", &body.uid, &user_value),
+        fs.set("wallets", &body.uid, &wallet_value),
+        fs.set("marki_wallets", &body.uid, &nfts_doc),
+        fs.set("crypto_wallets", &body.uid, &crypto_doc),
+    )
+    .map_err(|e| AppError::Firebase(e.to_string()))?;
 
-    state
-        .firestore
-        .set(
-            "crypto_wallets",
-            &body.uid,
-            &serde_json::json!({ "userId": body.uid, "wallets": [], "createdAt": now }),
-        )
-        .await
-        .map_err(|e| AppError::Firebase(e.to_string()))?;
-
-    // Send welcome notification (non-blocking).
-    notification_helpers::notify_welcome(&state.firestore, &body.uid, &body.name).await;
+    // Welcome notification: nobody waits for it.
+    {
+        let (st, uid, name) = (state.clone(), body.uid.clone(), body.name.clone());
+        tokio::spawn(async move { notification_helpers::notify_welcome(&st.firestore, &uid, &name).await });
+    }
 
     Ok((StatusCode::CREATED, Json(user)))
 }
