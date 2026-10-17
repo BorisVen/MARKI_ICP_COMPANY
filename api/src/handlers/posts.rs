@@ -299,6 +299,7 @@ pub async fn add_comment(
             &post.user_id,
             &post.title,
             &user_name,
+            &comment.text,
         )
         .await;
     }

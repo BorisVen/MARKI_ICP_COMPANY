@@ -170,7 +170,11 @@ pub async fn wayforpay_notice(State(state): State<Arc<AppState>>, body: Bytes) -
     let mut order = state.firestore.get(ORDERS, &id).await.map_err(fs)?
         .ok_or_else(|| AppError::NotFound("order not found".into()))?;
     let status = field("transactionStatus");
-    log_line(&mut order, format!("WayForPay: {status} · картка {} · {} {}", field("cardPan"), field("amount"), field("currency")));
+    let reason = match (field("reason"), field("reasonCode")) {
+        (r, c) if r.is_empty() && c.is_empty() => String::new(),
+        (r, c) => format!(" · причина: {r} ({c})"),
+    };
+    log_line(&mut order, format!("WayForPay: {status} · картка {} · {} {}{reason}", field("cardPan"), field("amount"), field("currency")));
     order["status"] = json!(status.to_lowercase());
 
     if status == "Approved" && order["credited"] != json!(true) {
@@ -327,8 +331,11 @@ mod orders_live {
         dotenvy::dotenv().ok();
         let config = crate::config::Config::from_env().unwrap();
         let db = FirestoreClient::new(config.clone(), Arc::new(GoogleAuthService::new(config).unwrap()));
-        let uid = std::env::var("BILLING_UID").unwrap();
-        for o in db.query(ORDERS, vec![QueryFilter::equal("uid", uid)], None, None).await.unwrap() {
+        let orders = match std::env::var("BILLING_ORDER") {
+            Ok(id) => db.get(ORDERS, &id).await.unwrap().into_iter().collect(),
+            Err(_) => db.query(ORDERS, vec![QueryFilter::equal("uid", std::env::var("BILLING_UID").unwrap())], None, None).await.unwrap(),
+        };
+        for o in orders {
             println!("{} {} {} credited={} principal={} return={}", o["createdAt"], o["id"], o["status"], o["credited"], o["principal"], o["returnTo"]);
             for l in o["log"].as_array().into_iter().flatten() { println!("   {}", l["text"]); }
         }

@@ -100,8 +100,8 @@ pub async fn notify_like(
         db,
         owner_id,
         NotificationType::Like,
-        "Someone liked your NFT ❤️".to_owned(),
-        format!("{} liked \"{}\"", from_user_name, nft_title),
+        format!("❤️ {from_user_name}"),
+        format!("Подобається ваш NFT «{}»", if nft_title.is_empty() { "без назви" } else { nft_title }),
         Some(NotificationMeta {
             nft_title: Some(nft_title.to_owned()),
             from_user: Some(from_user_name.to_owned()),
@@ -119,13 +119,16 @@ pub async fn notify_comment(
     owner_id: &str,
     nft_title: &str,
     from_user_name: &str,
+    text: &str,
 ) {
+    let short: String = text.chars().take(120).collect();
+    let short = if text.chars().count() > 120 { format!("{short}…") } else { short };
     let res = create(
         db,
         owner_id,
         NotificationType::Comment,
-        "New comment on your NFT 💬".to_owned(),
-        format!("{} commented on \"{}\"", from_user_name, nft_title),
+        format!("💬 {from_user_name} · «{}»", if nft_title.is_empty() { "NFT" } else { nft_title }),
+        short,
         Some(NotificationMeta {
             nft_title: Some(nft_title.to_owned()),
             from_user: Some(from_user_name.to_owned()),
