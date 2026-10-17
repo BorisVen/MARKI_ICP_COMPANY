@@ -153,6 +153,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/public/gifts/:code", get(gifts::preview_gift))
         .route("/public/goods/:code", get(goods::public_verify))
         .route("/public/billing/wayforpay", post(billing::wayforpay_notice))
+        .route("/public/ii-relay/:key", get(onchain::ii_relay_take).post(onchain::ii_relay_put))
         .route("/public/billing/return/:id", get(billing::back_to_app).post(billing::back_to_app))
         .route("/public/goods/:code/locate", post(goods::locate))
         .route("/ai/generate",   post(ai::generate_image));

@@ -70,3 +70,27 @@ mod tests {
         println!("tokens after: {}", tokens_of(&db, &uid).await.len());
     }
 }
+
+#[cfg(test)]
+mod wallet_check {
+    use crate::services::{firestore::QueryFilter, FirestoreClient, GoogleAuthService};
+    use std::sync::Arc;
+
+    /// Live: users who linked a wallet. `cargo test linked_wallets_live -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn linked_wallets_live() {
+        dotenvy::dotenv().ok();
+        let config = crate::config::Config::from_env().unwrap();
+        let db = FirestoreClient::new(config.clone(), Arc::new(GoogleAuthService::new(config).unwrap()));
+        for kind in ["ii", "plug"] {
+            for u in db.query("users", vec![QueryFilter::equal("icpWalletKind", kind)], None, None).await.unwrap() {
+                println!("{kind} @{} uid={} principal={}", u["username"], u["uid"], u["icpPrincipal"]);
+            }
+        }
+        for name in ["water", "alan"] {
+            let u = db.query("users", vec![QueryFilter::equal("username", name)], None, None).await.unwrap();
+            if let Some(u) = u.first() { println!("@{name} uid={} principal={} kind={}", u["uid"], u["icpPrincipal"], u["icpWalletKind"]); }
+        }
+    }
+}

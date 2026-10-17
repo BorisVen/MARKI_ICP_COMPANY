@@ -167,7 +167,8 @@ pub async fn wayforpay_notice(State(state): State<Arc<AppState>>, body: Bytes) -
             (Some(c), Ok(owner)) => match c.grant_plan(owner, &plan).await {
                 Ok(Ok(_)) => {
                     order["credited"] = json!(true);
-                    log_line(&mut order, format!("Тариф «{plan}» активовано в канистрі для {principal}"));
+                    let name = PLANS.iter().find(|(id, _)| *id == plan).map_or(plan.as_str(), |(_, n)| n);
+                    log_line(&mut order, format!("Тариф «{name}» активовано в канистрі для {principal}"));
                 }
                 Ok(Err(e)) => log_line(&mut order, format!("Канистра відмовила: {e}")),
                 Err(e) => log_line(&mut order, format!("Не вдалося звернутися до канистри: {e}")),
@@ -219,5 +220,48 @@ mod tests {
     fn notices_parse_as_json_or_form_wrapped_json() {
         assert_eq!(parse_notice(br#"{"orderReference":"MK-1"}"#).unwrap()["orderReference"], "MK-1");
         assert_eq!(parse_notice(b"%7B%22orderReference%22%3A%22MK-2%22%7D=").unwrap()["orderReference"], "MK-2");
+    }
+}
+
+#[cfg(test)]
+mod live {
+    use super::*;
+    use crate::services::{FirestoreClient, GoogleAuthService};
+
+    /// Live, test merchant only: sends production a signed "Approved" notice for
+    /// the newest pending order, as WayForPay would after a successful payment.
+    /// `cargo test approve_latest_live -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn approve_latest_live() {
+        dotenvy::dotenv().ok();
+        assert!(test_mode(), "only for the test merchant");
+        let config = crate::config::Config::from_env().unwrap();
+        let db = FirestoreClient::new(config.clone(), Arc::new(GoogleAuthService::new(config).unwrap()));
+        // `BILLING_ORDER=<id>` repeats the notice for that order (e.g. once the server key is set).
+        let o = match std::env::var("BILLING_ORDER") {
+            Ok(id) => db.get(ORDERS, &id).await.unwrap().expect("no such order"),
+            Err(_) => {
+                let mut orders = db.query(ORDERS, vec![QueryFilter::equal("status", "pending")], None, None).await.unwrap();
+                orders.sort_by(|a, b| b["createdAt"].as_str().cmp(&a["createdAt"].as_str()));
+                orders.into_iter().next().expect("no pending order")
+            }
+        };
+        let o = &o;
+        let id = o["id"].as_str().unwrap();
+        println!("order {id} · plan {} · {} · {}", o["planId"], o["principal"], o["createdAt"]);
+        let (amount, pan, status, reason, auth) = (o["amount"].as_str().unwrap(), "41****1111", "Approved", "1100", "541963");
+        let sig = sign(&[&merchant(), id, amount, "UAH", auth, pan, status, reason], &secret());
+        let notice = json!({
+            "merchantAccount": merchant(), "orderReference": id, "merchantSignature": sig,
+            "amount": serde_json::from_str::<Value>(amount).unwrap(), "currency": "UAH", "authCode": auth, "cardPan": pan,
+            "transactionStatus": status, "reasonCode": reason.parse::<u32>().unwrap(), "reason": "Ok",
+        });
+        let r = reqwest::Client::new().post("https://idenity.onrender.com/api/public/billing/wayforpay")
+            .json(&notice).send().await.unwrap();
+        println!("server: {} {}", r.status(), r.text().await.unwrap());
+        let after = db.get(ORDERS, id).await.unwrap().unwrap();
+        println!("credited: {}", after["credited"]);
+        for l in after["log"].as_array().unwrap() { println!("  {}", l["text"]); }
     }
 }

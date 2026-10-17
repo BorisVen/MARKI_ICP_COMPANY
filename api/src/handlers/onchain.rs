@@ -273,3 +273,47 @@ pub async fn register_push_token(
     state.firestore.set(crate::services::push::TOKENS, &auth.uid, &json!({ "tokens": &tokens[keep..] })).await.map_err(fs)?;
     Ok(StatusCode::NO_CONTENT)
 }
+
+const II_RELAY: &str = "ii_relay";
+
+/// `POST /api/public/ii-relay/:key` — the website hands the app its wallet
+/// sign-in (an Internet Identity delegation to the app's session key `key`).
+/// A delegation is useless without that key's private half, which never leaves
+/// the phone; the app checks it was made for its own key.
+pub async fn ii_relay_put(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(key): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<StatusCode> {
+    if !(60..=200).contains(&key.len()) || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::BadRequest("bad key".into()));
+    }
+    if body.len() > 16 * 1024 {
+        return Err(AppError::BadRequest("too large".into()));
+    }
+    let chain: Value = serde_json::from_slice(&body).map_err(|_| AppError::BadRequest("not json".into()))?;
+    if chain.get("delegations").and_then(Value::as_array).is_none() {
+        return Err(AppError::BadRequest("not a delegation".into()));
+    }
+    let doc = json!({ "chain": chain.to_string(), "createdAt": chrono::Utc::now().to_rfc3339() });
+    state.firestore.set(II_RELAY, &key.to_lowercase(), &doc).await.map_err(fs)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/public/ii-relay/:key` — the app picks its sign-in up (once, within 15 minutes).
+pub async fn ii_relay_take(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(key): axum::extract::Path<String>,
+) -> ApiResult<Json<Value>> {
+    let key = key.to_lowercase();
+    let doc = state.firestore.get(II_RELAY, &key).await.map_err(fs)?
+        .ok_or_else(|| AppError::NotFound("not yet".into()))?;
+    let _ = state.firestore.delete(II_RELAY, &key).await;
+    let fresh = doc["createdAt"].as_str()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .is_some_and(|t| chrono::Utc::now().signed_duration_since(t) < chrono::Duration::minutes(15));
+    if !fresh {
+        return Err(AppError::NotFound("expired".into()));
+    }
+    Ok(Json(json!({ "chain": doc["chain"] })))
+}
