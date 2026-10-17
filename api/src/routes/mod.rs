@@ -156,6 +156,7 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/public/ii-relay/:key", get(onchain::ii_relay_take).post(onchain::ii_relay_put))
         .route("/public/billing/return/:id", get(billing::back_to_app).post(billing::back_to_app))
         .route("/public/billing/pay/:id", get(billing::pay_page))
+        .route("/public/billing/price", get(billing::current_price))
         .route("/public/goods/:code/locate", post(goods::locate))
         .route("/ai/generate",   post(ai::generate_image));
 

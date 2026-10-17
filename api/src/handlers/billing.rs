@@ -7,7 +7,7 @@
 //! in the canister for the buyer's wallet (signed with the Marki server key).
 //!
 //! Env: `WFP_MERCHANT`, `WFP_SECRET` (default: WayForPay's public test merchant),
-//! `WFP_DOMAIN`, `BILLING_PRICE_UAH` (default 1 while testing), `PUBLIC_API_URL`.
+//! `WFP_DOMAIN`, `BILLING_PRICE` + `BILLING_CURRENCY` (default 0.01 USD while testing), `PUBLIC_API_URL`.
 
 use axum::{body::Bytes, extract::{Path, State}, response::{Html, IntoResponse, Redirect, Response}, Extension, Json};
 use chrono::Utc;
@@ -34,7 +34,13 @@ fn env(key: &str, default: &str) -> String {
 fn merchant() -> String { env("WFP_MERCHANT", "test_merch_n1") }
 fn secret() -> String { env("WFP_SECRET", "flk3409refn54t54t*FNJRET") }
 fn domain() -> String { env("WFP_DOMAIN", "borisven.github.io") }
-fn price() -> String { env("BILLING_PRICE_UAH", "1") }
+fn price() -> String { env("BILLING_PRICE", "0.01") }
+fn currency() -> String { env("BILLING_CURRENCY", "USD") }
+
+/// `GET /api/public/billing/price` — what a plan costs by card right now (the test price while testing).
+pub async fn current_price() -> Json<Value> {
+    Json(json!({ "amount": price(), "currency": currency(), "testMode": test_mode() }))
+}
 pub fn test_mode() -> bool { merchant() == "test_merch_n1" }
 
 /// HMAC-MD5 (hex) of the fields joined with ";" — WayForPay's signature.
@@ -98,7 +104,8 @@ pub async fn checkout(
     let amount = price();
     let product = format!("Marki · тариф «{plan_name}»");
     let (merchant, domain) = (merchant(), domain());
-    let signature = sign(&[&merchant, &domain, &id, &date, &amount, "UAH", &product, "1", &amount], &secret());
+    let cur = currency();
+    let signature = sign(&[&merchant, &domain, &id, &date, &amount, &cur, &product, "1", &amount], &secret());
     let api = env("PUBLIC_API_URL", "https://idenity.onrender.com");
 
     let fields = vec![
@@ -110,7 +117,7 @@ pub async fn checkout(
         ("orderReference".into(), id.clone()),
         ("orderDate".into(), date),
         ("amount".into(), amount.clone()),
-        ("currency".into(), "UAH".into()),
+        ("currency".into(), cur.clone()),
         ("productName[]".into(), product),
         ("productCount[]".into(), "1".into()),
         ("productPrice[]".into(), amount.clone()),
@@ -121,14 +128,14 @@ pub async fn checkout(
     ];
     let mut order = json!({
         "id": id, "uid": auth.uid, "planId": plan_id, "principal": req.principal.trim(),
-        "amount": amount, "currency": "UAH", "status": "pending", "credited": false,
+        "amount": amount, "currency": cur, "status": "pending", "credited": false,
         "testMode": test_mode(), "createdAt": Utc::now().to_rfc3339(),
         "returnTo": req.return_url.as_deref().filter(|u| u.starts_with("https://")),
         // Paid from the phone app: WayForPay's page opens in a browser tab, which then hands back to the app.
         "app": req.app,
         "form": fields.iter().map(|(n, v)| json!({ "n": n, "v": v })).collect::<Vec<_>>(),
     });
-    log_line(&mut order, format!("Створено замовлення: тариф «{plan_name}», {amount} UAH{}", if test_mode() { " (тестовий режим)" } else { "" }));
+    log_line(&mut order, format!("Створено замовлення: тариф «{plan_name}», {amount} {cur}{}", if test_mode() { " (тестовий режим)" } else { "" }));
     state.firestore.set(ORDERS, &id, &order).await.map_err(fs)?;
 
     Ok(Json(Checkout { order_id: id, url: "https://secure.wayforpay.com/pay".into(), fields, test_mode: test_mode() }))
@@ -292,10 +299,11 @@ mod live {
         let id = o["id"].as_str().unwrap();
         println!("order {id} · plan {} · {} · {}", o["planId"], o["principal"], o["createdAt"]);
         let (amount, pan, status, reason, auth) = (o["amount"].as_str().unwrap(), "41****1111", "Approved", "1100", "541963");
-        let sig = sign(&[&merchant(), id, amount, "UAH", auth, pan, status, reason], &secret());
+        let cur = o["currency"].as_str().unwrap_or("UAH");
+        let sig = sign(&[&merchant(), id, amount, cur, auth, pan, status, reason], &secret());
         let notice = json!({
             "merchantAccount": merchant(), "orderReference": id, "merchantSignature": sig,
-            "amount": serde_json::from_str::<Value>(amount).unwrap(), "currency": "UAH", "authCode": auth, "cardPan": pan,
+            "amount": serde_json::from_str::<Value>(amount).unwrap(), "currency": cur, "authCode": auth, "cardPan": pan,
             "transactionStatus": status, "reasonCode": reason.parse::<u32>().unwrap(), "reason": "Ok",
         });
         let r = reqwest::Client::new().post("https://idenity.onrender.com/api/public/billing/wayforpay")

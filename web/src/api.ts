@@ -685,3 +685,8 @@ export type BillingOrder = {
 export const apiBillingCheckout = (d: { planId: string; principal: string; returnUrl: string }) =>
   post<BillingCheckout>('/api/billing/checkout', d);
 export const apiBillingOrders = () => get<BillingOrder[]>('/api/billing/orders');
+export type BillingPrice = { amount: string; currency: string; testMode: boolean };
+export const apiBillingPrice = () => get<BillingPrice>('/api/public/billing/price');
+/** "$0.01", "1 грн". */
+export const fmtBillingPrice = (p: BillingPrice) =>
+  p.currency === 'USD' ? `$${p.amount}` : p.currency === 'UAH' ? `${p.amount} грн` : `${p.amount} ${p.currency}`;

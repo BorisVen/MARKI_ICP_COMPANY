@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { apiBillingPrice, fmtBillingPrice, type BillingPrice } from '../api';
 import { paymentsIdl, type PaymentsService, type PlanQuote } from '../icp/idl';
 import { friendlyIcpError } from '../icp/errors';
 import { CardOrders, payByCard } from '../icp/CardPay';
@@ -33,6 +34,9 @@ export default function PricingPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [price, setPrice] = useState<BillingPrice | null>(null);
+
+  useEffect(() => { apiBillingPrice().then(setPrice).catch(() => {}); }, []);
 
   const loadPlans = useCallback(async () => {
     const payments = await anonymousActor<PaymentsService>(PAYMENTS_CANISTER_ID, paymentsIdl);
@@ -129,7 +133,7 @@ export default function PricingPage() {
                 onClick={() => card(q)}
                 disabled={!wallet || !!busy}
               >
-                {!wallet ? 'Спершу гаманець' : `💳 ${current ? 'Продовжити' : 'Оплатити'} · 1 грн (тест)`}
+                {!wallet ? 'Спершу гаманець' : `💳 ${current ? 'Продовжити' : 'Оплатити'}${price ? ` · ${fmtBillingPrice(price)}${price.testMode ? ' (тест)' : ''}` : ''}`}
               </button>
             </div>
           );
