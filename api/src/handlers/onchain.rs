@@ -40,6 +40,9 @@ pub fn looks_like_principal(p: &str) -> bool {
 pub struct LinkRequest {
     /// `None` unlinks.
     pub principal: Option<String>,
+    /// "ii" or "plug" (default).
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// `PUT /api/me/icp-principal` — link (or unlink) the Plug principal.
@@ -54,7 +57,8 @@ pub async fn link_principal(
             return Err(AppError::BadRequest("Це не схоже на principal гаманця".into()));
         }
     }
-    state.firestore.update("users", &auth.uid, &json!({ "icpPrincipal": principal })).await.map_err(fs)?;
+    let kind = principal.as_ref().map(|_| match req.kind.as_deref() { Some("ii") => "ii", _ => "plug" });
+    state.firestore.update("users", &auth.uid, &json!({ "icpPrincipal": principal, "icpWalletKind": kind })).await.map_err(fs)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -141,14 +145,22 @@ mod tests {
 /// Moves the tokens of NFTs just gifted from the sender's custody sub-account to
 /// the receiver's, in the background. Tokens held elsewhere (e.g. a brand's own
 /// Plug) are left for the sender to hand over from their wallet.
-pub fn spawn_custody_move(from_uid: String, to_uid: String, mint_addresses: Vec<String>) {
+pub fn spawn_custody_move(state: Arc<AppState>, from_uid: String, to_uid: String, mint_addresses: Vec<String>) {
     tokio::spawn(async move {
         let Some(c) = crate::services::icp::custody().await else { return };
         let ids: Vec<u64> = mint_addresses.iter().filter_map(|m| crate::services::icp::token_of(m, &c.canister())).collect();
         if ids.is_empty() {
             return;
         }
-        match c.transfer(&from_uid, &c.account_of(&to_uid), &ids).await {
+        // Receivers with their own wallet get the token there; the rest in custody.
+        let own = state.firestore.get("users", &to_uid).await.ok().flatten()
+            .filter(|u| u["icpWalletKind"] == "ii")
+            .and_then(|u| u["icpPrincipal"].as_str().and_then(|p| candid::Principal::from_text(p).ok()));
+        let to = match own {
+            Some(owner) => crate::services::icp::Account { owner, subaccount: None },
+            None => c.account_of(&to_uid),
+        };
+        match c.transfer(&from_uid, &to, &ids).await {
             Ok(res) => {
                 let moved = res.iter().filter(|r| r.is_ok()).count();
                 tracing::info!(moved, total = ids.len(), "custody move for a gift");

@@ -145,6 +145,7 @@ service : (opt InitArg) -> {
   set_custodian : (principal) -> (variant { Ok; Err : text });
   mint_uploaded_to : (nat64, text, nat32, opt Account) -> (variant { Ok : MintResult; Err : text });
   grant_plan_by_operator : (principal, text) -> (variant { Ok : Subscription; Err : text });
+  move_plan : (principal) -> (variant { Ok : Subscription; Err : text });
   grant_credits : (principal, nat64, nat64, nat32) -> (variant { Ok : Subscription; Err : text });
   subscription_of : (principal) -> (opt Subscription) query;
   purchases_of : (principal) -> (vec PlanPurchase) query;

@@ -67,6 +67,9 @@ pub struct UserData {
     /// The user's ICP principal (Plug): where gifted tokens are sent on-chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icp_principal: Option<String>,
+    /// What that principal is: "ii" (own Internet Identity wallet) or "plug".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icp_wallet_kind: Option<String>,
 }
 
 /// Public profile fields returned by `GET /api/users/search`.

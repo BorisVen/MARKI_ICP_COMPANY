@@ -432,6 +432,7 @@ pub async fn claim_gift(
         crate::handlers::nfts::record_move(&state, &c.source_nft_id, &auth.uid, &c.nft_id).await;
     }
     crate::handlers::onchain::spawn_custody_move(
+        state.clone(),
         gift.owner_id.clone(),
         auth.uid.clone(),
         received_all.iter().filter_map(|n| n.mint_address.clone()).collect(),

@@ -866,6 +866,42 @@ fn grant_plan_by_operator(owner: Principal, plan_id: String) -> Result<Subscript
     Ok(credit_plan(owner, &plan, ic_cdk::api::time()))
 }
 
+/// Moves the caller's plan to another wallet of the same person (e.g. from the
+/// built-in Marki wallet to their own Internet Identity). Credits add up, the
+/// later expiry wins; the caller's plan is removed.
+#[update]
+fn move_plan(to: Principal) -> Result<Subscription, String> {
+    let caller = ic_cdk::api::msg_caller();
+    if caller == Principal::anonymous() || to == Principal::anonymous() {
+        return Err("anonymous".into());
+    }
+    if caller == to {
+        return Err("same wallet".into());
+    }
+    let now = ic_cdk::api::time();
+    let from = SUBSCRIPTIONS.with(|m| m.borrow().get(&caller.to_text())).ok_or("no plan to move")?;
+    if from.expires_at_ns <= now {
+        return Err("the plan has expired".into());
+    }
+    let merged = match SUBSCRIPTIONS.with(|m| m.borrow().get(&to.to_text())) {
+        Some(t) if t.expires_at_ns > now => Subscription {
+            owner: to,
+            plan_id: if from.expires_at_ns > t.expires_at_ns { from.plan_id.clone() } else { t.plan_id.clone() },
+            photo_mints_left: t.photo_mints_left + from.photo_mints_left,
+            metadata_mints_left: t.metadata_mints_left + from.metadata_mints_left,
+            max_photo_kb: t.max_photo_kb.max(from.max_photo_kb),
+            expires_at_ns: t.expires_at_ns.max(from.expires_at_ns),
+        },
+        _ => Subscription { owner: to, ..from },
+    };
+    SUBSCRIPTIONS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.remove(&caller.to_text());
+        m.insert(to.to_text(), merged.clone());
+    });
+    Ok(merged)
+}
+
 /// Controller only: set the principal of Marki's custody key.
 #[update]
 fn set_custodian(custodian: Principal) -> Result<(), String> {

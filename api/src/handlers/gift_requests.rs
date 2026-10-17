@@ -230,7 +230,7 @@ pub async fn approve(
     their_wallet.push(given);
     save_nfts(&state, &request.requester_id, &their_wallet).await?;
     crate::handlers::nfts::record_move(&state, &request.nft_id, &request.requester_id, &new_id).await;
-    crate::handlers::onchain::spawn_custody_move(auth.uid.clone(), request.requester_id.clone(), mint.into_iter().collect());
+    crate::handlers::onchain::spawn_custody_move(state.clone(), auth.uid.clone(), request.requester_id.clone(), mint.into_iter().collect());
 
     request.status = "approved".into();
     request.decided_at = Some(now.clone());
