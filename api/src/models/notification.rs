@@ -29,6 +29,10 @@ pub struct NotificationMeta {
     pub delivery_address: Option<String>,
     pub buyer_full_name: Option<String>,
     pub buyer_phone: Option<String>,
+    // ── Where tapping the notification leads in the app ───────────────────────
+    /// "likes" | "comments" (target = post id), "gift-requests", "gifts", "nfts", "orders", "goods".
+    pub action: Option<String>,
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -814,7 +814,7 @@ async fn flag_unit(state: &AppState, batch_id: &str, code: &str, flag: CloneFlag
         "text": format!("«{product}», партія {}, № {serial}. {text}", batch.lot),
         "read": false,
         "createdAt": Utc::now().to_rfc3339(),
-        "metadata": crate::models::NotificationMeta { nft_title: Some(product), ..Default::default() },
+        "metadata": crate::models::NotificationMeta { nft_title: Some(product), action: Some("goods".into()), ..Default::default() },
     });
     if let Err(e) = state.firestore.set("notifications", &id, &doc).await {
         tracing::warn!(error = %e, "Failed to notify the brand about a suspected clone");

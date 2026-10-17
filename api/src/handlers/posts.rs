@@ -214,6 +214,7 @@ pub async fn like_post(
             notification_helpers::notify_like(
                 &state.firestore,
                 &post.user_id,
+                &post_id,
                 &post.title,
                 &liker_name,
             )
@@ -297,6 +298,7 @@ pub async fn add_comment(
         notification_helpers::notify_comment(
             &state.firestore,
             &post.user_id,
+            &post_id,
             &post.title,
             &user_name,
             &comment.text,

@@ -174,7 +174,8 @@ pub(crate) async fn user_doc(state: &AppState, uid: &str) -> ApiResult<Value> {
         .unwrap_or_else(|| json!({})))
 }
 
-pub(crate) async fn notify(state: &AppState, user_id: &str, title: String, text: String, nft_title: &str) {
+/// `action`: where tapping it leads in the app (see `NotificationMeta::action`).
+pub(crate) async fn notify(state: &AppState, user_id: &str, title: String, text: String, nft_title: &str, action: &str) {
     let id = Uuid::new_v4().to_string();
     let doc = json!({
         "id": id,
@@ -184,7 +185,7 @@ pub(crate) async fn notify(state: &AppState, user_id: &str, title: String, text:
         "text": text,
         "read": false,
         "createdAt": Utc::now().to_rfc3339(),
-        "metadata": NotificationMeta { nft_title: Some(nft_title.to_owned()), ..Default::default() },
+        "metadata": NotificationMeta { nft_title: Some(nft_title.to_owned()), action: Some(action.to_owned()), ..Default::default() },
     });
     if let Err(e) = state.firestore.set("notifications", &id, &doc).await {
         tracing::warn!(error = %e, "Failed to create gift notification");
@@ -451,10 +452,10 @@ pub async fn claim_gift(
         let (st, uid, owner_id, owner_name) = (state.clone(), auth.uid.clone(), gift.owner_id.clone(), gift.owner_name.clone());
         let (left, total, my_name, nft_title) = (gift.remaining_nft_ids.len(), gift.total, my_name.clone(), nft_title.clone());
         tokio::spawn(async move {
-            notify(&st, &uid, "You received a gift 🎁".into(),
-                format!("\"{}\" from {} is now in your passports", nft_title, owner_name), &nft_title).await;
-            notify(&st, &owner_id, "Your gift was claimed 🎁".into(),
-                format!("{} claimed \"{}\" ({} of {} left)", my_name, nft_title, left, total), &nft_title).await;
+            notify(&st, &uid, "🎁 Вам подарунок".into(),
+                format!("«{}» від {} уже у ваших паспортах", nft_title, owner_name), &nft_title, "nfts").await;
+            notify(&st, &owner_id, "🎁 Подарунок забрали".into(),
+                format!("{} забрав «{}» (лишилось {} з {})", my_name, nft_title, left, total), &nft_title, "gifts").await;
         });
     }
 

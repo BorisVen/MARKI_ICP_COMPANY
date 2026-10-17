@@ -93,6 +93,7 @@ pub async fn notify_sale(
 pub async fn notify_like(
     db: &FirestoreClient,
     owner_id: &str,
+    post_id: &str,
     nft_title: &str,
     from_user_name: &str,
 ) {
@@ -105,6 +106,8 @@ pub async fn notify_like(
         Some(NotificationMeta {
             nft_title: Some(nft_title.to_owned()),
             from_user: Some(from_user_name.to_owned()),
+            action: Some("likes".into()),
+            target: Some(post_id.to_owned()),
             ..Default::default()
         }),
     )
@@ -117,6 +120,7 @@ pub async fn notify_like(
 pub async fn notify_comment(
     db: &FirestoreClient,
     owner_id: &str,
+    post_id: &str,
     nft_title: &str,
     from_user_name: &str,
     text: &str,
@@ -132,6 +136,8 @@ pub async fn notify_comment(
         Some(NotificationMeta {
             nft_title: Some(nft_title.to_owned()),
             from_user: Some(from_user_name.to_owned()),
+            action: Some("comments".into()),
+            target: Some(post_id.to_owned()),
             ..Default::default()
         }),
     )

@@ -155,7 +155,7 @@ pub async fn create(
     };
     save(&state, &request).await?;
     notify(&state, &req.owner_id, "Запит на подарунок 🎁".into(),
-        format!("{} просить «{}» (купив {})", request.requester_name, request.nft_title, request.bought_on), &request.nft_title).await;
+        format!("{} просить «{}» (купив {})", request.requester_name, request.nft_title, request.bought_on), &request.nft_title, "gift-requests").await;
     Ok((StatusCode::CREATED, Json(request)))
 }
 
@@ -249,7 +249,7 @@ pub async fn approve(
     let (st, uid, title) = (state.clone(), request.requester_id.clone(), request.nft_title.clone());
     tokio::spawn(async move {
         notify(&st, &uid, "Подарунок видано 🎁".into(),
-            format!("«{}» від {} уже у ваших паспортах", title, owner_name), &title).await;
+            format!("«{}» від {} уже у ваших паспортах", title, owner_name), &title, "nfts").await;
     });
     Ok(Json(request))
 }
@@ -271,7 +271,7 @@ pub async fn decline(
     request.decided_at = Some(Utc::now().to_rfc3339());
     save(&state, &request).await?;
     notify(&state, &request.requester_id, "Запит на подарунок відхилено".into(),
-        format!("Власник не видав «{}»", request.nft_title), &request.nft_title).await;
+        format!("Власник не видав «{}»", request.nft_title), &request.nft_title, "gifts").await;
     Ok(Json(request))
 }
 

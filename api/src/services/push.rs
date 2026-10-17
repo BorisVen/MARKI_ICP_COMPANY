@@ -34,7 +34,12 @@ pub async fn send(db: &FirestoreClient, notification: &Value) {
         let message = json!({ "message": {
             "token": token,
             "notification": { "title": title, "body": body },
-            "data": { "type": kind, "page": "notifications", "id": notification["id"].as_str().unwrap_or_default() },
+            "data": {
+                "type": kind,
+                "id": notification["id"].as_str().unwrap_or_default(),
+                "action": notification["metadata"]["action"].as_str().unwrap_or_default(),
+                "target": notification["metadata"]["target"].as_str().unwrap_or_default(),
+            },
             "android": { "priority": "high", "notification": { "channel_id": "marki" } },
         }});
         match db.fcm_send(&message).await {
@@ -66,7 +71,20 @@ mod tests {
         let users = db.query("users", vec![QueryFilter::equal("username", username)], None, None).await.unwrap();
         let uid = users[0]["uid"].as_str().unwrap().to_owned();
         println!("tokens: {}", tokens_of(&db, &uid).await.len());
-        send(&db, &json!({ "id": format!("test-{}", chrono::Utc::now().timestamp_millis()), "userId": uid, "title": "❤️ water", "text": "Подобається ваш NFT «Marki Genesis #1»", "type": "like" })).await;
+        // `PUSH_ACTION=likes|comments|gift-requests`: the push opens that (on the user's newest post).
+        let action = std::env::var("PUSH_ACTION").unwrap_or_default();
+        let post = db.query("posts", vec![QueryFilter::equal("userId", uid.clone())], None, None).await.unwrap_or_default()
+            .into_iter().max_by(|a, b| a["createdAt"].as_str().cmp(&b["createdAt"].as_str()));
+        let (target, title) = (post.as_ref().and_then(|p| p["id"].as_str()).unwrap_or_default().to_owned(),
+            post.as_ref().and_then(|p| p["title"].as_str()).unwrap_or("NFT").to_owned());
+        println!("action={action} post={target} «{title}»");
+        let (head, text, kind) = match action.as_str() {
+            "comments" => ("💬 HarisAlan · «".to_owned() + &title + "»", "Класна річ! 🔥".to_owned(), "comment"),
+            "gift-requests" => ("Запит на подарунок 🎁".to_owned(), format!("HarisAlan просить «{title}»"), "gift"),
+            _ => ("❤️ HarisAlan".to_owned(), format!("Подобається ваш NFT «{title}»"), "like"),
+        };
+        send(&db, &json!({ "id": format!("test-{}", chrono::Utc::now().timestamp_millis()), "userId": uid, "title": head, "text": text, "type": kind,
+            "metadata": { "action": if action.is_empty() { "likes" } else { action.as_str() }, "target": target } })).await;
         println!("tokens after: {}", tokens_of(&db, &uid).await.len());
     }
 }
