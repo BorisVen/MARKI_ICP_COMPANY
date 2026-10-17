@@ -16,6 +16,7 @@ import PlanMeter from '../icp/PlanMeter';
 import { useSubscription } from '../icp/useSubscription';
 import { disconnectWallet, useWallet } from '../icp/useWallet';
 import WalletConnect from '../icp/WalletConnect';
+import { CardOrders, payByCard } from '../icp/CardPay';
 import {
   anonymousActor,
   IS_LOCAL_NETWORK,
@@ -141,6 +142,13 @@ export default function PricingPage() {
     }
   };
 
+  const card = async (q: PlanQuote) => {
+    if (!wallet) return;
+    setError(null);
+    setBusy(`Відкриваємо оплату карткою «${q.plan.name}»…`);
+    try { await payByCard(q.plan.id, wallet.principal); } catch (e) { setError(errText(e)); setBusy(null); }
+  };
+
   const fee = pricing?.ledger_fee_e8s ?? 10_000n;
   const planName = (id: string) => plans.find(p => p.plan.id === id)?.plan.name ?? id;
   const fundCmd = wallet ? `./scripts/fund.sh ${wallet.principal}` : '';
@@ -157,6 +165,8 @@ export default function PricingPage() {
       {error && <div className="error-banner">{error}</div>}
       {success && <div className="success-banner" style={{ marginBottom: 12 }}>{success}</div>}
       {busy && <div className="progress-banner" style={{ marginBottom: 12 }}><div className="mini-spin" /><div style={{ fontSize: 13 }}>{busy}</div></div>}
+
+      <CardOrders onPaid={() => { setSuccess('Оплата карткою пройшла — тариф активовано.'); plan.refresh(); }} />
 
       {/* Current plan first: it is what a returning customer looks for. */}
       {plan.active && (
@@ -248,6 +258,9 @@ export default function PricingPage() {
                 disabled={!wallet || !!busy || notEnough}
               >
                 {label}
+              </button>
+              <button className="btn btn-block" onClick={() => card(q)} disabled={!wallet || !!busy}>
+                💳 Карткою · 1 грн (тест)
               </button>
             </div>
           );

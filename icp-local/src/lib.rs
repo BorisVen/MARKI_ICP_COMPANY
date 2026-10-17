@@ -822,9 +822,14 @@ async fn buy_plan(plan_id: String, max_price_e8s: u64) -> Result<Subscription, S
         })
     });
 
-    let key = buyer.to_text();
+    Ok(credit_plan(buyer, &plan, now))
+}
+
+/// Adds a plan's credits and period to `owner`'s subscription.
+fn credit_plan(owner: Principal, plan: &Plan, now: u64) -> Subscription {
+    let key = owner.to_text();
     let mut sub = SUBSCRIPTIONS.with(|m| m.borrow().get(&key)).unwrap_or(Subscription {
-        owner: buyer,
+        owner,
         plan_id: plan.id.clone(),
         photo_mints_left: 0,
         metadata_mints_left: 0,
@@ -843,7 +848,22 @@ async fn buy_plan(plan_id: String, max_price_e8s: u64) -> Result<Subscription, S
     sub.max_photo_kb = sub.max_photo_kb.max(plan.max_photo_kb);
     sub.expires_at_ns += plan.period_days as u64 * NS_PER_DAY;
     SUBSCRIPTIONS.with(|m| m.borrow_mut().insert(key, sub.clone()));
-    Ok(sub)
+    sub
+}
+
+/// Marki's server (the custody key) activates a plan paid by card (fiat).
+/// The payment is verified by the server with the card processor first.
+#[update]
+fn grant_plan_by_operator(owner: Principal, plan_id: String) -> Result<Subscription, String> {
+    let caller = ic_cdk::api::msg_caller();
+    if settings().custodian != Some(caller) && !ic_cdk::api::is_controller(&caller) {
+        return Err("only Marki's server can activate card-paid plans".into());
+    }
+    if owner == Principal::anonymous() {
+        return Err("anonymous owner".into());
+    }
+    let plan = find_plan(&plan_id)?;
+    Ok(credit_plan(owner, &plan, ic_cdk::api::time()))
 }
 
 /// Controller only: set the principal of Marki's custody key.

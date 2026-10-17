@@ -665,3 +665,23 @@ export const apiOnchainPending = () => get<PendingOnchain[]>('/api/onchain/pendi
 /** Move my tokens from Marki custody to my own wallet (all on-chain NFTs when `nftIds` is empty). */
 export const apiWithdrawOnchain = (principal: string, nftIds: string[] = []) =>
   post<{ moved: number; total: number }>('/api/onchain/withdraw', { principal, nftIds });
+
+// ── Card payments for plans (WayForPay; test mode charges 1 UAH) ────────────
+
+export type BillingCheckout = { orderId: string; url: string; fields: [string, string][]; testMode: boolean };
+export type BillingOrder = {
+  id: string;
+  planId: string;
+  principal: string;
+  amount: string;
+  currency: string;
+  /** pending · approved · declined · … (WayForPay's status, lowercased) */
+  status: string;
+  credited: boolean;
+  testMode: boolean;
+  createdAt: string;
+  log: { at: string; text: string }[];
+};
+export const apiBillingCheckout = (d: { planId: string; principal: string; returnUrl: string }) =>
+  post<BillingCheckout>('/api/billing/checkout', d);
+export const apiBillingOrders = () => get<BillingOrder[]>('/api/billing/orders');

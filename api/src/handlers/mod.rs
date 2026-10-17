@@ -6,6 +6,7 @@ pub mod deliveries;
 pub mod gifts;
 pub mod gift_requests;
 pub mod goods;
+pub mod billing;
 pub mod names;
 pub mod onchain;
 pub mod marketplace;

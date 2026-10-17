@@ -7,7 +7,7 @@ use axum::{
 use std::sync::Arc;
 
 use crate::{
-    handlers::{admin, ai, auth, cod_orders, deliveries, gift_requests, onchain, gifts, goods, marketplace, nfc, notifications, nfts, posts, profile, public, users, wallets},
+    handlers::{admin, ai, auth, cod_orders, billing, deliveries, gift_requests, onchain, gifts, goods, marketplace, nfc, notifications, nfts, posts, profile, public, users, wallets},
     middleware::auth::auth_middleware,
     AppState,
 };
@@ -83,6 +83,8 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/gifts/split", post(gifts::create_gift_group))
         .route("/me/icp-principal", put(onchain::link_principal))
         .route("/onchain/pending", get(onchain::pending))
+        .route("/billing/checkout", post(billing::checkout))
+        .route("/billing/orders", get(billing::my_orders))
         .route("/onchain/account", get(onchain::account))
         .route("/onchain/withdraw", post(onchain::withdraw))
         .route("/gift-requests", get(gift_requests::mine).post(gift_requests::create))
@@ -148,6 +150,8 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/public/nfts/:owner_id/:nft_id/view", post(public::view_passport))
         .route("/public/gifts/:code", get(gifts::preview_gift))
         .route("/public/goods/:code", get(goods::public_verify))
+        .route("/public/billing/wayforpay", post(billing::wayforpay_notice))
+        .route("/public/billing/return/:id", get(billing::back_to_app).post(billing::back_to_app))
         .route("/public/goods/:code/locate", post(goods::locate))
         .route("/ai/generate",   post(ai::generate_image));
 

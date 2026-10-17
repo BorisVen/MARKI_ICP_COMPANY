@@ -90,6 +90,16 @@ impl Custody {
         Account { owner: self.custodian, subaccount: Some(serde_bytes::ByteBuf::from(user_subaccount(uid).to_vec())) }
     }
 
+    /// Activates a card-paid plan for `owner` (the canister lets only this key do it).
+    pub async fn grant_plan(&self, owner: Principal, plan_id: &str) -> anyhow::Result<Result<candid::Reserved, String>> {
+        let bytes = self
+            .agent
+            .update(&self.canister, "grant_plan_by_operator")
+            .with_arg(candid::encode_args((owner, plan_id.to_owned()))?)
+            .await?;
+        Ok(candid::decode_one::<Result<candid::Reserved, String>>(&bytes)?)
+    }
+
     /// Moves tokens out of `from_uid`'s custody sub-account to `to`.
     /// Returns one result per token (Unauthorized: not in that sub-account).
     pub async fn transfer(&self, from_uid: &str, to: &Account, token_ids: &[u64]) -> anyhow::Result<Vec<Result<Nat, TransferError>>> {
