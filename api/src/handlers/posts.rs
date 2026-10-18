@@ -36,10 +36,11 @@ pub async fn get_posts(
         .await
         .map_err(|e| AppError::Firebase(e.to_string()))?;
 
-    let posts: Vec<Post> = docs
+    let mut posts: Vec<Post> = docs
         .into_iter()
         .filter_map(|d| serde_json::from_value(d).ok())
         .collect();
+    crate::handlers::names::refresh_posts(&state, &mut posts).await;
 
     Ok(Json(posts))
 }

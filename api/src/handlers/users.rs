@@ -210,12 +210,12 @@ async fn profile_tab(state: Arc<AppState>, ids: Vec<String>) -> ApiResult<Json<V
         .await
         .map_err(|e| AppError::Firebase(e.to_string()))?;
     let wanted: std::collections::HashSet<String> = ids.into_iter().collect();
-    Ok(Json(
-        docs.into_iter()
-            .filter_map(|d| serde_json::from_value::<Post>(d).ok())
-            .filter(|p| wanted.contains(&p.id))
-            .collect(),
-    ))
+    let mut posts: Vec<Post> = docs.into_iter()
+        .filter_map(|d| serde_json::from_value::<Post>(d).ok())
+        .filter(|p| wanted.contains(&p.id))
+        .collect();
+    crate::handlers::names::refresh_posts(&state, &mut posts).await;
+    Ok(Json(posts))
 }
 
 async fn current_user_ids(state: &AppState, uid: &str, field: &str) -> ApiResult<Vec<String>> {

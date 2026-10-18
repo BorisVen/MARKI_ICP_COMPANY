@@ -17,6 +17,7 @@ const TTL: Duration = Duration::from_secs(60);
 pub struct Person {
     pub name: String,
     pub username: Option<String>,
+    pub avatar: Option<String>,
 }
 
 static CACHE: LazyLock<Mutex<HashMap<String, (Instant, Option<Person>)>>> = LazyLock::new(Default::default);
@@ -32,6 +33,7 @@ fn person(doc: &Value) -> Person {
     Person {
         name: if company.is_empty() { text(doc, "name") } else { company },
         username: (!username.is_empty()).then_some(username),
+        avatar: Some(text(doc, "avatar")).filter(|a| !a.is_empty()),
     }
 }
 
@@ -61,6 +63,28 @@ pub async fn lookup(state: &AppState, uids: Vec<String>) -> HashMap<String, Pers
         }
     }
     out
+}
+
+/// Posts keep the author's name and photo from when they were made: show the
+/// current ones (also for commenters).
+pub async fn refresh_posts(state: &AppState, posts: &mut [crate::models::Post]) {
+    let mut uids: Vec<String> = posts.iter().map(|p| p.user_id.clone()).collect();
+    uids.extend(posts.iter().flat_map(|p| p.comments.iter().map(|c| c.user_id.clone())));
+    uids.sort();
+    uids.dedup();
+    let people = lookup(state, uids).await;
+    for p in posts.iter_mut() {
+        if let Some(who) = people.get(&p.user_id) {
+            p.user_name = who.name.clone();
+            if who.avatar.is_some() { p.user_avatar = who.avatar.clone(); }
+        }
+        for c in p.comments.iter_mut() {
+            if let Some(who) = people.get(&c.user_id) {
+                c.user_name = who.name.clone();
+                if who.avatar.is_some() { c.user_avatar = who.avatar.clone(); }
+            }
+        }
+    }
 }
 
 /// Replaces stored owner names in NFT chains with the owners' current names.

@@ -189,3 +189,156 @@ mod find_users {
         }
     }
 }
+
+#[cfg(test)]
+mod cleanup_test_nfts {
+    use crate::services::{FirestoreClient, GoogleAuthService};
+    use serde_json::{json, Value};
+    use std::collections::{BTreeMap, HashSet};
+    use std::sync::Arc;
+
+    /// Minted for real: an ICP token (`icp:<canister>:<id>`) or a Solana mint address.
+    /// Mints that exist on a real network: the mainnet ICP canister and the three
+    /// Solana mints found on mainnet-beta (the rest were made on devnet).
+    const SOLANA_MAINNET: &[&str] = &[
+        "5uEgQTmoKyvq2fM9Bn2qabTeqZA2MFufRVCU6BFnCqUk",
+        "ELSGC6qmJg2CCZVYidQx2yE5T8g4VhHEXNUVuCVzCwvB",
+        "FwxtySFhWsK5KR6MRKvzfPvuqMhHfqj6bkkxJtsWjpc9",
+    ];
+    pub fn real_mint(m: &str) -> bool {
+        let m = m.trim();
+        m.starts_with("icp:dbrm3-yqaaa-aaaak-qzjeq-cai:") || SOLANA_MAINNET.contains(&m)
+    }
+
+    fn nfts(doc: &Value) -> Vec<Value> { doc["nfts"].as_array().cloned().unwrap_or_default() }
+
+    /// Test NFTs (never minted) and the posts made only of them.
+    /// Dry run: `cargo test cleanup_test_nfts_live -- --ignored --nocapture`.
+    /// `APPLY=1` first saves everything it removes to `BACKUP` (a JSON file), then removes.
+    #[tokio::test]
+    #[ignore]
+    async fn cleanup_test_nfts_live() {
+        dotenvy::dotenv().ok();
+        let config = crate::config::Config::from_env().unwrap();
+        let db = FirestoreClient::new(config.clone(), Arc::new(GoogleAuthService::new(config).unwrap()));
+        let apply = std::env::var("APPLY").is_ok_and(|v| v == "1");
+        let names: BTreeMap<String, String> = db.query("users", vec![], None, Some(5000)).await.unwrap().into_iter()
+            .map(|u| (u["uid"].as_str().unwrap_or("").to_owned(), u["username"].as_str().unwrap_or("").to_owned())).collect();
+
+        let mut test_ids = HashSet::new();
+        let mut real_ids = HashSet::new();
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        let mut backup = json!({ "wallets": {}, "posts": [] });
+        let mut plans: Vec<(String, Vec<Value>, u64)> = vec![];
+        for w in db.query("marki_wallets", vec![], None, None).await.unwrap() {
+            let uid = w["userId"].as_str().or(w["uid"].as_str()).or(w["_id"].as_str()).or(w["id"].as_str()).unwrap_or("").to_owned();
+            if uid.is_empty() { println!("wallet without uid, keys: {:?}", w.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())); continue; }
+            let chunks = w["nftChunks"].as_u64().unwrap_or(0);
+            let mut all = nfts(&w);
+            for k in 1..=chunks {
+                if let Some(c) = db.get("marki_wallet_nfts", &format!("{uid}_{k}")).await.unwrap() { all.extend(nfts(&c)); }
+            }
+            let (keep, drop): (Vec<Value>, Vec<Value>) = all.into_iter().partition(|n| n["mintAddress"].as_str().is_some_and(real_mint));
+            for n in &keep { real_ids.insert(n["id"].as_str().unwrap_or("").to_owned()); }
+            for n in &drop {
+                test_ids.insert(n["id"].as_str().unwrap_or("").to_owned());
+                let kind = match n["mintAddress"].as_str() { None => "no mint".to_owned(), Some(m) if m.is_empty() => "empty".into(), Some(m) => m.chars().take(10).collect() };
+                *kinds.entry(kind).or_default() += 1;
+            }
+            if !drop.is_empty() {
+                println!("@{:<16} keep {:>5} (icp/sol)  remove {:>5}", names.get(&uid).cloned().unwrap_or(uid.clone()), keep.len(), drop.len());
+                backup["wallets"][&uid] = json!(drop);
+                plans.push((uid, keep, chunks));
+            }
+        }
+        println!("KINDS of unminted: {kinds:?}");
+
+        let posts = db.query("posts", vec![], None, None).await.unwrap();
+        let mut drop_posts = vec![];
+        for p in &posts {
+            let refs: Vec<String> = p["walletNftIds"].as_array().cloned().unwrap_or_default().iter()
+                .chain(std::iter::once(&p["walletNftId"])).filter_map(|v| v.as_str().map(str::to_owned)).filter(|s| !s.is_empty()).collect();
+            // Old posts without NFTs are test posts too; a post stays if anything in it is real.
+            let only_test = !refs.iter().any(|r| real_ids.contains(r));
+            if only_test { drop_posts.push(p.clone()); }
+        }
+        println!("posts: {} total, remove {} (made only of test NFTs)", posts.len(), drop_posts.len());
+        for p in drop_posts.iter().take(12) { println!("   - «{}» by @{}", p["title"].as_str().unwrap_or(""), names.get(p["userId"].as_str().unwrap_or("")).cloned().unwrap_or_default()); }
+
+        if !apply { println!("dry run — nothing changed"); return; }
+        backup["posts"] = json!(drop_posts);
+        let path = std::env::var("BACKUP").expect("BACKUP=<file> is required to apply");
+        std::fs::write(&path, serde_json::to_string_pretty(&backup).unwrap()).unwrap();
+        println!("backup written to {path}");
+        for p in &drop_posts { db.delete("posts", p["id"].as_str().unwrap()).await.unwrap(); }
+        for (uid, keep, old_chunks) in plans {
+            let mut parts = keep.chunks(400);
+            let first = parts.next().unwrap_or(&[]).to_vec();
+            let rest: Vec<Vec<Value>> = parts.map(|c| c.to_vec()).collect();
+            for (i, part) in rest.iter().enumerate() {
+                db.set_raw("marki_wallet_nfts", &format!("{uid}_{}", i + 1), &json!({ "userId": uid, "nfts": part })).await.unwrap();
+            }
+            db.update("marki_wallets", &uid, &json!({ "nfts": first, "nftChunks": rest.len() })).await.unwrap();
+            for k in rest.len() as u64 + 1..=old_chunks { let _ = db.delete("marki_wallet_nfts", &format!("{uid}_{k}")).await; }
+        }
+        println!("applied");
+    }
+}
+
+#[cfg(test)]
+mod list_posts {
+    use crate::services::{FirestoreClient, GoogleAuthService};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// Live: every post with what it points to (and whether that NFT is minted).
+    #[tokio::test]
+    #[ignore]
+    async fn list_posts_live() {
+        dotenvy::dotenv().ok();
+        let config = crate::config::Config::from_env().unwrap();
+        let db = FirestoreClient::new(config.clone(), Arc::new(GoogleAuthService::new(config).unwrap()));
+        let names: HashMap<String, String> = db.query("users", vec![], None, Some(5000)).await.unwrap().into_iter()
+            .map(|u| (u["uid"].as_str().unwrap_or("").to_owned(), u["username"].as_str().unwrap_or("").to_owned())).collect();
+        let mut mints: HashMap<String, String> = HashMap::new();
+        for w in db.query("marki_wallets", vec![], None, None).await.unwrap() {
+            let uid = w["userId"].as_str().or(w["id"].as_str()).unwrap_or("").to_owned();
+            let mut all = w["nfts"].as_array().cloned().unwrap_or_default();
+            for k in 1..=w["nftChunks"].as_u64().unwrap_or(0) {
+                if let Some(c) = db.get("marki_wallet_nfts", &format!("{uid}_{k}")).await.unwrap() { all.extend(c["nfts"].as_array().cloned().unwrap_or_default()); }
+            }
+            for n in all { if std::env::var("FULL").is_ok() { if let Some(m) = n["mintAddress"].as_str() { println!("MINT {m}"); } } mints.insert(n["id"].as_str().unwrap_or("").to_owned(), n["mintAddress"].as_str().unwrap_or("-").chars().take(14).collect()); }
+        }
+        let mut posts = db.query("posts", vec![], None, None).await.unwrap();
+        posts.sort_by(|a, b| b["createdAt"].as_str().cmp(&a["createdAt"].as_str()));
+        for p in posts {
+            let refs: Vec<String> = p["walletNftIds"].as_array().cloned().unwrap_or_default().iter().chain(std::iter::once(&p["walletNftId"]))
+                .filter_map(|v| v.as_str().map(str::to_owned)).filter(|s| !s.is_empty()).collect();
+            let state: Vec<String> = refs.iter().take(2).map(|r| mints.get(r).cloned().unwrap_or("GONE".into())).collect();
+            println!("{} | @{:<14} | {:<26} | refs {:>3} {:?} | img {}", &p["createdAt"].as_str().unwrap_or("")[..10], names.get(p["userId"].as_str().unwrap_or("")).cloned().unwrap_or_default(),
+                p["title"].as_str().unwrap_or("").chars().take(26).collect::<String>(), refs.len(), state, p["nftImage"].as_str().map(|s| !s.is_empty()).unwrap_or(false));
+        }
+    }
+}
+
+#[cfg(test)]
+mod remove_orphan_posts {
+    use crate::services::{FirestoreClient, GoogleAuthService};
+    use std::sync::Arc;
+
+    /// Live: removes posts by their real document name when the title matches `TITLES`.
+    #[tokio::test]
+    #[ignore]
+    async fn remove_posts_by_title_live() {
+        dotenvy::dotenv().ok();
+        let config = crate::config::Config::from_env().unwrap();
+        let db = FirestoreClient::new(config.clone(), Arc::new(GoogleAuthService::new(config).unwrap()));
+        let titles: Vec<String> = std::env::var("TITLES").unwrap().split('|').map(str::to_owned).collect();
+        for (name, title) in db.names_and_titles("posts").await.unwrap() {
+            if titles.contains(&title) {
+                println!("delete posts/{name} «{title}»");
+                if std::env::var("APPLY").is_ok_and(|v| v == "1") { db.delete("posts", &name).await.unwrap(); }
+            }
+        }
+    }
+}

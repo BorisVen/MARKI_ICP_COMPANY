@@ -109,6 +109,26 @@ impl FirestoreClient {
         Ok(())
     }
 
+    /// Document names (the real IDs, which a stored `id` field can hide) of a
+    /// collection, with each document's `title` — for maintenance scripts.
+    pub async fn names_and_titles(&self, collection: &str) -> Result<Vec<(String, String)>> {
+        let token = self.token().await?;
+        let mut out = vec![];
+        let mut page: Option<String> = None;
+        loop {
+            let mut url = format!("{}/{}?pageSize=300&mask.fieldPaths=title", self.base_url(), collection);
+            if let Some(p) = &page { url.push_str(&format!("&pageToken={p}")); }
+            let v: Value = self.http.get(&url).bearer_auth(&token).send().await?.json().await?;
+            for d in v["documents"].as_array().into_iter().flatten() {
+                let name = d["name"].as_str().unwrap_or_default().rsplit('/').next().unwrap_or_default().to_owned();
+                let title = d["fields"]["title"]["stringValue"].as_str().unwrap_or_default().to_owned();
+                out.push((name, title));
+            }
+            match v["nextPageToken"].as_str() { Some(t) => page = Some(t.to_owned()), None => break }
+        }
+        Ok(out)
+    }
+
     /// Create a document with a Firestore-generated ID.  Returns the new ID.
     pub async fn create(&self, collection: &str, data: &Value) -> Result<String> {
         let token = self.token().await?;
