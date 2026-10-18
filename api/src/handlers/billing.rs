@@ -177,7 +177,16 @@ pub async fn wayforpay_notice(State(state): State<Arc<AppState>>, body: Bytes) -
     log_line(&mut order, format!("WayForPay: {status} · картка {} · {} {}{reason}", field("cardPan"), field("amount"), field("currency")));
     order["status"] = json!(status.to_lowercase());
 
-    if status == "Approved" && order["credited"] != json!(true) {
+    // WayForPay's test merchant key is public, so in test mode anyone could sign
+    // an "Approved" notice: there the plan is activated only when allowed explicitly.
+    let paid_as_ordered = field("amount").parse::<f64>().ok() == order["amount"].as_str().and_then(|a| a.parse::<f64>().ok())
+        && field("currency") == order["currency"].as_str().unwrap_or_default();
+    let may_credit = !test_mode() || std::env::var("BILLING_TEST_CREDIT").is_ok_and(|v| v == "1");
+    if status == "Approved" && !paid_as_ordered {
+        log_line(&mut order, format!("Сума або валюта не збігаються із замовленням ({} {}) — тариф не активовано", field("amount"), field("currency")));
+    } else if status == "Approved" && !may_credit {
+        log_line(&mut order, "Тестовий режим: оплату прийнято, але тариф автоматично не вмикається".into());
+    } else if status == "Approved" && order["credited"] != json!(true) {
         let principal = order["principal"].as_str().unwrap_or_default().to_owned();
         let plan = order["planId"].as_str().unwrap_or_default().to_owned();
         match (crate::services::icp::custody().await, candid::Principal::from_text(&principal)) {

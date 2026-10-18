@@ -18,7 +18,20 @@ async fn create(
     text: String,
     metadata: Option<NotificationMeta>,
 ) -> Result<()> {
-    let id = Uuid::new_v4().to_string();
+    create_with_id(db, &Uuid::new_v4().to_string(), user_id, notification_type, title, text, metadata).await
+}
+
+/// Same as `create`, under a chosen id (one notification per like, not per tap).
+async fn create_with_id(
+    db: &FirestoreClient,
+    id: &str,
+    user_id: &str,
+    notification_type: NotificationType,
+    title: String,
+    text: String,
+    metadata: Option<NotificationMeta>,
+) -> Result<()> {
+    let id = id.to_owned();
     let notification = Notification {
         id: id.clone(),
         user_id: user_id.to_owned(),
@@ -44,12 +57,13 @@ pub async fn notify_purchase(
         db,
         buyer_id,
         NotificationType::Purchase,
-        "Purchase successful 🛒".to_owned(),
-        format!("You bought \"{}\" for {} {}", nft_title, price, currency),
+        "🛍️ Покупка успішна".to_owned(),
+        format!("Ви купили «{}» за {} {}", nft_title, price, currency),
         Some(NotificationMeta {
             nft_title: Some(nft_title.to_owned()),
             price: Some(price),
             currency: Some(currency.to_owned()),
+            action: Some("orders".into()),
             ..Default::default()
         }),
     )
@@ -71,16 +85,14 @@ pub async fn notify_sale(
         db,
         seller_id,
         NotificationType::Sale,
-        "Your NFT was sold 💰".to_owned(),
-        format!(
-            "\"{}\" was sold to {} for {} {}",
-            nft_title, buyer_name, price, currency
-        ),
+        "💰 Ваш NFT продано".to_owned(),
+        format!("«{}» купив {} за {} {}", nft_title, buyer_name, price, currency),
         Some(NotificationMeta {
             nft_title: Some(nft_title.to_owned()),
             price: Some(price),
             currency: Some(currency.to_owned()),
             from_user: Some(buyer_name.to_owned()),
+            action: Some("orders".into()),
             ..Default::default()
         }),
     )
@@ -93,12 +105,19 @@ pub async fn notify_sale(
 pub async fn notify_like(
     db: &FirestoreClient,
     owner_id: &str,
+    from_uid: &str,
     post_id: &str,
     nft_title: &str,
     from_user_name: &str,
 ) {
-    let res = create(
+    // One per liker and post: liking again after an unlike does not ping again.
+    let id = format!("like-{post_id}-{}", from_uid);
+    if db.get("notifications", &id).await.ok().flatten().is_some() {
+        return;
+    }
+    let res = create_with_id(
         db,
+        &id,
         owner_id,
         NotificationType::Like,
         format!("❤️ {from_user_name}"),
@@ -152,11 +171,8 @@ pub async fn notify_welcome(db: &FirestoreClient, user_id: &str, user_name: &str
         db,
         user_id,
         NotificationType::Welcome,
-        "Welcome to Idenity 🎉".to_owned(),
-        format!(
-            "Hi {}! Your wallet has been created. Start creating and trading NFTs.",
-            user_name
-        ),
+        "👋 Вітаємо в Marki".to_owned(),
+        format!("Привіт, {user_name}! Створюйте паспорти речей, даруйте й продавайте NFT."),
         None,
     )
     .await;
@@ -170,8 +186,8 @@ pub async fn notify_nft_created(db: &FirestoreClient, user_id: &str, nft_title: 
         db,
         user_id,
         NotificationType::NftCreated,
-        "NFT created 🎨".to_owned(),
-        format!("Your NFT \"{}\" has been minted.", nft_title),
+        "🎨 NFT створено".to_owned(),
+        format!("«{}» уже в блокчейні", nft_title),
         Some(NotificationMeta {
             nft_title: Some(nft_title.to_owned()),
             ..Default::default()
@@ -195,15 +211,14 @@ pub async fn notify_cod_buyer(
         db,
         buyer_id,
         NotificationType::Purchase,
-        "Order placed 📦".to_owned(),
-        format!(
-            "Your order for \"{}\" ({} {}) has been placed. It will be delivered to: {}",
-            nft_title, price, currency, delivery_address
-        ),
+        "📦 Замовлення оформлено".to_owned(),
+        format!("«{}» за {} {} — продавець скоро відправить", nft_title, price, currency),
         Some(NotificationMeta {
             nft_title: Some(nft_title.to_owned()),
             price: Some(price),
             currency: Some(currency.to_owned()),
+            delivery_address: Some(delivery_address.to_owned()),
+            action: Some("orders".into()),
             ..Default::default()
         }),
     )
@@ -229,12 +244,9 @@ pub async fn notify_cod_seller(
         db,
         seller_id,
         NotificationType::Sale,
-        "New COD order 🚚".to_owned(),
-        format!(
-            "{} ordered \"{}\" for {} {}.\nShip to: {} ({}), {}",
-            buyer_name, nft_title, price, currency,
-            full_name, phone, delivery_address
-        ),
+        "🚚 Нове замовлення".to_owned(),
+        // The address and phone stay in the order: this text reaches the lock screen.
+        format!("{} замовив «{}» за {} {}. Деталі доставки — у «Замовленнях»", buyer_name, nft_title, price, currency),
         Some(NotificationMeta {
             nft_title: Some(nft_title.to_owned()),
             price: Some(price),
@@ -258,8 +270,8 @@ pub async fn notify_batch_created(db: &FirestoreClient, user_id: &str, count: us
         db,
         user_id,
         NotificationType::NftCreated,
-        format!("{} NFTs created 🎨", count),
-        format!("Your batch of {} NFTs has been minted successfully.", count),
+        format!("🎨 Створено {} NFT", count),
+        "Партія вже в блокчейні".to_owned(),
         Some(NotificationMeta {
             batch_count: Some(count),
             ..Default::default()

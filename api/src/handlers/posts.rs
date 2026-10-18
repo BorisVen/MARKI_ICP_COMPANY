@@ -214,6 +214,7 @@ pub async fn like_post(
             notification_helpers::notify_like(
                 &state.firestore,
                 &post.user_id,
+                &auth.uid,
                 &post_id,
                 &post.title,
                 &liker_name,
@@ -247,6 +248,9 @@ pub async fn add_comment(
     let body_text = body.text.trim().to_owned();
     if body_text.is_empty() {
         return Err(AppError::BadRequest("Comment text cannot be empty".to_owned()));
+    }
+    if body_text.chars().count() > 500 {
+        return Err(AppError::BadRequest("Коментар задовгий: до 500 символів".to_owned()));
     }
 
     let doc = state
