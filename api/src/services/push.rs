@@ -342,3 +342,36 @@ mod remove_orphan_posts {
         }
     }
 }
+
+#[cfg(test)]
+mod discover_preview {
+    use crate::services::{FirestoreClient, GoogleAuthService};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    /// Live: the collections /api/discover would show (owner, title, count).
+    #[tokio::test]
+    #[ignore]
+    async fn discover_preview_live() {
+        dotenvy::dotenv().ok();
+        let config = crate::config::Config::from_env().unwrap();
+        let db = FirestoreClient::new(config.clone(), Arc::new(GoogleAuthService::new(config).unwrap()));
+        let names: BTreeMap<String, String> = db.query("users", vec![], None, Some(5000)).await.unwrap().into_iter()
+            .map(|u| (u["uid"].as_str().unwrap_or("").to_owned(), u["username"].as_str().unwrap_or("").to_owned())).collect();
+        let mut n = 0;
+        for w in db.query("marki_wallets", vec![], None, None).await.unwrap() {
+            let uid = w["userId"].as_str().or(w["id"].as_str()).unwrap_or("").to_owned();
+            let mut all = w["nfts"].as_array().cloned().unwrap_or_default();
+            for k in 1..=w["nftChunks"].as_u64().unwrap_or(0) {
+                if let Some(c) = db.get("marki_wallet_nfts", &format!("{uid}_{k}")).await.unwrap() { all.extend(c["nfts"].as_array().cloned().unwrap_or_default()); }
+            }
+            let mut groups: BTreeMap<String, usize> = BTreeMap::new();
+            for x in all.iter().filter(|x| x["mintAddress"].as_str().is_some_and(|m| !m.is_empty()) && x["image"].as_str().is_some_and(|i| !i.is_empty())) {
+                let t = x["batchName"].as_str().filter(|b| !b.is_empty()).or(x["title"].as_str()).unwrap_or("").to_owned();
+                *groups.entry(format!("{t}|{}", x["image"].as_str().unwrap_or(""))).or_default() += 1;
+            }
+            for (k, c) in groups { n += 1; println!("@{:<14} {:<30} ×{c}", names.get(&uid).cloned().unwrap_or_default(), k.split('|').next().unwrap_or("")); }
+        }
+        println!("cards: {n}");
+    }
+}

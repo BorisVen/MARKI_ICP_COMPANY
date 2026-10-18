@@ -4,7 +4,7 @@ use axum::{
     Extension, Json,
 };
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -312,4 +312,77 @@ pub async fn add_comment(
     }
 
     Ok(Json(comment))
+}
+
+// ── Discover: real NFTs of everyone, beside the posts ────────────────────────
+//
+// The market only had posts, so it looked empty. Every minted NFT is already
+// public on its owner's profile; here they come grouped by collection (one
+// card for "Water ×12"), newest first, without the ones a post already shows.
+
+static DISCOVER: std::sync::LazyLock<std::sync::Mutex<Option<(std::time::Instant, Vec<Value>)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// `GET /api/discover` — collections of minted NFTs, shaped like posts (`discover: true`).
+pub async fn discover(
+    State(state): State<Arc<AppState>>,
+    Extension(_auth): Extension<AuthenticatedUser>,
+) -> ApiResult<Json<Vec<Value>>> {
+    if let Some((at, items)) = DISCOVER.lock().unwrap().clone() {
+        if at.elapsed() < std::time::Duration::from_secs(60) {
+            return Ok(Json(items));
+        }
+    }
+    let fs = |e: anyhow::Error| AppError::Firebase(e.to_string());
+    let in_posts: std::collections::HashSet<String> = state.firestore.query("posts", vec![], None, None).await.map_err(fs)?
+        .iter()
+        .flat_map(|p| {
+            let mut ids: Vec<String> = p["walletNftIds"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+            ids.extend(p["walletNftId"].as_str().map(str::to_owned));
+            ids
+        })
+        .collect();
+
+    let mut groups: Vec<(String, Vec<crate::models::Nft>)> = vec![];
+    for wallet in state.firestore.query("marki_wallets", vec![], None, None).await.map_err(fs)? {
+        let uid = wallet["userId"].as_str().or(wallet["id"].as_str()).unwrap_or_default().to_owned();
+        if uid.is_empty() { continue; }
+        let nfts = crate::handlers::nfts::nfts_in_wallet(state.as_ref(), &uid, &wallet).await.unwrap_or_default();
+        let mut by_collection: std::collections::BTreeMap<String, Vec<crate::models::Nft>> = Default::default();
+        for n in nfts.into_iter().filter(|n| n.mint_address.as_deref().is_some_and(|m| !m.is_empty()) && !n.image.is_empty()) {
+            let key = format!("{}|{}", n.batch_name.clone().unwrap_or_else(|| n.title.clone()), n.image);
+            by_collection.entry(key).or_default().push(n);
+        }
+        for (_, list) in by_collection {
+            if list.iter().any(|n| in_posts.contains(&n.id)) { continue; }
+            groups.push((uid.clone(), list));
+        }
+    }
+
+    let people = crate::handlers::names::lookup(&state, groups.iter().map(|(u, _)| u.clone()).collect()).await;
+    let mut items: Vec<Value> = groups.into_iter().map(|(uid, list)| {
+        let first = &list[0];
+        let who = people.get(&uid);
+        let title = first.batch_name.clone().filter(|b| !b.is_empty()).unwrap_or_else(|| first.title.clone());
+        json!({
+            "id": format!("nft-{}", first.id),
+            "discover": true,
+            "count": list.len(),
+            "userId": uid,
+            "userName": who.map(|p| p.name.clone()).unwrap_or_else(|| first.owner_name.clone()),
+            "userAvatar": who.and_then(|p| p.avatar.clone()),
+            "title": title,
+            "description": first.description,
+            "nftImage": first.image,
+            "nftImages": [],
+            "walletNftId": first.id,
+            "walletNftIds": list.iter().take(50).map(|n| n.id.clone()).collect::<Vec<_>>(),
+            "createdAt": list.iter().map(|n| n.created_at.clone()).max().unwrap_or_default(),
+            "forSale": false,
+            "likes": 0, "likedBy": [], "reposts": 0, "comments": [], "tags": first.tags,
+        })
+    }).collect();
+    items.sort_by(|a, b| b["createdAt"].as_str().cmp(&a["createdAt"].as_str()));
+    *DISCOVER.lock().unwrap() = Some((std::time::Instant::now(), items.clone()));
+    Ok(Json(items))
 }
