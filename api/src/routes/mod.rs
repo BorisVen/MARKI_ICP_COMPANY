@@ -88,6 +88,8 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/onchain/pending", get(onchain::pending))
         .route("/billing/checkout", post(billing::checkout))
         .route("/billing/orders", get(billing::my_orders))
+        .route("/billing/me", get(billing::billing_me))
+        .route("/billing/test-purchase", post(billing::test_purchase))
         .route("/onchain/account", get(onchain::account))
         .route("/onchain/withdraw", post(onchain::withdraw))
         .route("/gift-requests", get(gift_requests::mine).post(gift_requests::create))

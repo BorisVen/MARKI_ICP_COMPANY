@@ -167,3 +167,25 @@ mod migrate_texts {
         println!("total {total}, to change {changed}, applied: {apply}");
     }
 }
+
+#[cfg(test)]
+mod find_users {
+    use crate::services::{FirestoreClient, GoogleAuthService};
+    use std::sync::Arc;
+
+    /// Live: users whose email or name contains one of `FIND` (comma-separated).
+    #[tokio::test]
+    #[ignore]
+    async fn find_users_live() {
+        dotenvy::dotenv().ok();
+        let config = crate::config::Config::from_env().unwrap();
+        let db = FirestoreClient::new(config.clone(), Arc::new(GoogleAuthService::new(config).unwrap()));
+        let needles: Vec<String> = std::env::var("FIND").unwrap().split(',').map(|s| s.trim().to_lowercase()).collect();
+        for u in db.query("users", vec![], None, Some(5000)).await.unwrap() {
+            let (email, name, nick) = (u["email"].as_str().unwrap_or("").to_lowercase(), u["name"].as_str().unwrap_or("").to_lowercase(), u["username"].as_str().unwrap_or(""));
+            if needles.iter().any(|n| email.contains(n) || name.contains(n)) {
+                println!("{} | {} | @{} | {}", u["uid"].as_str().unwrap_or(""), email, nick, u["name"].as_str().unwrap_or(""));
+            }
+        }
+    }
+}

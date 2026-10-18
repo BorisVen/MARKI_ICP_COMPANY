@@ -253,6 +253,66 @@ pub async fn back_to_app(State(state): State<Arc<AppState>>, Path(id): Path<Stri
     Redirect::to(&web).into_response()
 }
 
+/// Accounts that may "buy" a plan without paying while real payments are not
+/// set up (Alan, Boris, water). Env `BILLING_TESTERS` (comma-separated uids) overrides.
+const TESTERS: &[&str] = &[
+    "IQSuPQ6GBFf8aOtDV9tJW0WPkzB3", "UgWB9vvc1pa43LCmByjPjny9Nwo1", // playgameharis@gmail.com
+    "qT8qvbaW5ZT4xTj2sor2tKlod7C2",                                 // alankharisov@gmail.com
+    "bUN9mGgABxXyLDiHsqtPP876rgY2", "oRxU6XGwvmPQNDSri172zoUwp342", // water@gmail.com
+    "gQKgDdOs4yUzan5rm8JcgPEjxNF3",                                 // Борис Венедиктов
+];
+
+fn is_tester(uid: &str) -> bool {
+    match std::env::var("BILLING_TESTERS") {
+        Ok(list) if !list.trim().is_empty() => list.split(',').any(|u| u.trim() == uid),
+        _ => TESTERS.contains(&uid),
+    }
+}
+
+/// `GET /api/billing/me` — may this account buy plans for free (testing)?
+pub async fn billing_me(Extension(auth): Extension<AuthenticatedUser>) -> Json<Value> {
+    Json(json!({ "tester": is_tester(&auth.uid) }))
+}
+
+/// `POST /api/billing/test-purchase` — testers get a plan as if they had paid:
+/// an order with a log, and the plan activated in the canister.
+pub async fn test_purchase(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthenticatedUser>,
+    Json(req): Json<CheckoutRequest>,
+) -> ApiResult<Json<Value>> {
+    if !is_tester(&auth.uid) {
+        return Err(AppError::Forbidden("Тестова покупка доступна лише тестовим акаунтам".into()));
+    }
+    let (plan_id, plan_name) = PLANS.iter().find(|(id, _)| *id == req.plan_id)
+        .ok_or_else(|| AppError::BadRequest("Невідомий тариф".into()))?;
+    let owner = candid::Principal::from_text(req.principal.trim())
+        .map_err(|_| AppError::BadRequest("Підключіть гаманець, на який активувати тариф".into()))?;
+    let id = format!("MK-T{}", &Uuid::new_v4().simple().to_string()[..11]);
+    let mut order = json!({
+        "id": id, "uid": auth.uid, "planId": plan_id, "principal": req.principal.trim(),
+        "amount": "0", "currency": currency(), "status": "approved", "credited": false,
+        "testMode": true, "testPurchase": true, "createdAt": Utc::now().to_rfc3339(),
+    });
+    log_line(&mut order, format!("Тестова покупка тарифу «{plan_name}» — без оплати"));
+    match crate::services::icp::custody().await {
+        Some(c) => match c.grant_plan(owner, plan_id).await {
+            Ok(Ok(_)) => {
+                order["credited"] = json!(true);
+                log_line(&mut order, format!("Тариф «{plan_name}» активовано в канистрі"));
+            }
+            Ok(Err(e)) => log_line(&mut order, format!("Канистра відмовила: {e}")),
+            Err(e) => log_line(&mut order, format!("Не вдалося звернутися до канистри: {e}")),
+        },
+        None => log_line(&mut order, "Ключ сервера не налаштований — тариф не активовано".into()),
+    }
+    state.firestore.set(ORDERS, &id, &order).await.map_err(fs)?;
+    if order["credited"] != json!(true) {
+        return Err(AppError::Internal(anyhow::anyhow!("тариф не активовано")));
+    }
+    Ok(Json(order))
+}
+
 /// `GET /api/billing/orders` — my card orders with their logs, newest first.
 pub async fn my_orders(
     State(state): State<Arc<AppState>>,
