@@ -112,3 +112,58 @@ mod wallet_check {
         }
     }
 }
+
+#[cfg(test)]
+mod migrate_texts {
+    use crate::services::{FirestoreClient, GoogleAuthService};
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    fn s(v: &Value) -> String { v.as_str().unwrap_or_default().to_owned() }
+    fn money(m: &Value) -> String {
+        match (m["price"].as_f64(), m["currency"].as_str()) { (Some(p), Some(c)) => format!(" за {p} {c}"), _ => String::new() }
+    }
+
+    /// Old English notifications → the current Ukrainian texts, and no buyer
+    /// phone/address in order texts. Written without push (set_raw).
+    /// Dry run: `cargo test migrate_notifications_live -- --ignored --nocapture`; `APPLY=1` writes.
+    #[tokio::test]
+    #[ignore]
+    async fn migrate_notifications_live() {
+        dotenvy::dotenv().ok();
+        let config = crate::config::Config::from_env().unwrap();
+        let db = FirestoreClient::new(config.clone(), Arc::new(GoogleAuthService::new(config).unwrap()));
+        let apply = std::env::var("APPLY").is_ok_and(|v| v == "1");
+        let all = db.query("notifications", vec![], None, None).await.unwrap();
+        let (mut changed, mut total) = (0, 0);
+        for mut n in all {
+            total += 1;
+            let (title, m) = (s(&n["title"]), n["metadata"].clone());
+            let (t, from) = (s(&m["nftTitle"]), s(&m["fromUser"]));
+            let new: Option<(String, String)> = match title.as_str() {
+                "Someone liked your NFT ❤️" => Some((format!("❤️ {from}"), format!("Подобається ваш NFT «{t}»"))),
+                "New comment on your NFT 💬" => Some((format!("💬 {from} · «{t}»"), "Новий коментар".into())),
+                "Purchase successful 🛒" => Some(("🛍️ Покупка успішна".into(), format!("Ви купили «{t}»{}", money(&m)))),
+                "Your NFT was sold 💰" => Some(("💰 Ваш NFT продано".into(), format!("«{t}» купив {from}{}", money(&m)))),
+                "Welcome to Idenity 🎉" => Some(("👋 Вітаємо в Marki".into(), "Створюйте паспорти речей, даруйте й продавайте NFT.".into())),
+                "NFT created 🎨" => Some(("🎨 NFT створено".into(), format!("«{t}» уже в блокчейні"))),
+                "Order placed 📦" => Some(("📦 Замовлення оформлено".into(), format!("«{t}»{} — продавець скоро відправить", money(&m)))),
+                "New COD order 🚚" => Some(("🚚 Нове замовлення".into(), format!("{from} замовив «{t}»{}. Деталі доставки — у «Замовленнях»", money(&m)))),
+                "You received a gift 🎁" => Some(("🎁 Вам подарунок".into(), format!("«{t}» уже у ваших паспортах"))),
+                "Your gift was claimed 🎁" => Some(("🎁 Подарунок забрали".into(), format!("«{t}» забрали"))),
+                x if x.ends_with("NFTs created 🎨") => Some((format!("🎨 Створено {} NFT", x.split_whitespace().next().unwrap_or("")), "Партія вже в блокчейні".into())),
+                _ => None,
+            };
+            let Some((nt, nx)) = new else { continue };
+            changed += 1;
+            if changed <= 6 { println!("{title}  →  {nt} | {nx}"); }
+            if apply {
+                n["title"] = json!(nt);
+                n["text"] = json!(nx);
+                let id = s(&n["id"]);
+                db.set_raw("notifications", &id, &n).await.unwrap();
+            }
+        }
+        println!("total {total}, to change {changed}, applied: {apply}");
+    }
+}

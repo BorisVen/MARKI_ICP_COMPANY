@@ -13,12 +13,13 @@ use crate::{
 };
 
 /// Build the full `/api` router.
-/// Public routes (no auth required): `POST /api/auth/register`
+/// Public routes (no auth required)
 /// All other routes require a valid Firebase Bearer token.
 pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     // ── Protected routes ──────────────────────────────────────────────────────
     let protected = Router::new()
         // Auth
+        .route("/auth/register", post(auth::register))
         .route("/auth/me", get(auth::me))
         // Profile
         .route("/profile/:uid", get(profile::get_profile))
@@ -144,7 +145,6 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 
     // ── Public routes (no auth required) ─────────────────────────────────────
     let public = Router::new()
-        .route("/auth/register", post(auth::register))
         .route("/public/users/:username", get(public::get_profile))
         .route("/public/users/:username/nfts", get(public::get_user_nfts))
         .route("/public/users/:username/view", post(public::view_profile))

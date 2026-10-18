@@ -58,7 +58,15 @@ pub async fn update_profile(
 
     let mut patch = serde_json::Map::new();
     if let Some(v) = body.name            { patch.insert("name".to_owned(),            json!(v)); }
-    if let Some(v) = body.username        { patch.insert("username".to_owned(),        json!(v)); }
+    if let Some(v) = body.username {
+        // Older nicknames may not fit today's rules: check only a change.
+        let current = state.firestore.get("users", &uid).await.ok().flatten()
+            .and_then(|u| u["username"].as_str().map(str::to_owned));
+        if current.as_deref() != Some(v.trim().trim_start_matches('@')) {
+            let v = check_username(&state, &v, &uid).await?;
+            patch.insert("username".to_owned(), json!(v));
+        }
+    }
     if let Some(v) = body.bio             { patch.insert("bio".to_owned(),             json!(v)); }
     if let Some(v) = body.location        { patch.insert("location".to_owned(),        json!(v)); }
     if let Some(v) = body.delivery_address {
@@ -243,4 +251,26 @@ pub async fn request_approval(
         .map_err(|e| AppError::Firebase(e.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+
+/// A free, well-formed nickname (3–24 of a–z, 0–9, `_`, `.`), compared without
+/// case: `?u=alan` must lead to one person. Returns it trimmed, without `@`.
+pub(crate) async fn check_username(state: &AppState, raw: &str, me: &str) -> Result<String, AppError> {
+    let name = raw.trim().trim_start_matches('@').to_owned();
+    let ok = (3..=24).contains(&name.chars().count())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+    if !ok {
+        return Err(AppError::BadRequest("Нікнейм: 3–24 латинські літери, цифри, «_» або «.»".into()));
+    }
+    let lower = name.to_lowercase();
+    let users = state.firestore.query("users", vec![], None, Some(5000)).await
+        .map_err(|e| AppError::Firebase(e.to_string()))?;
+    let taken = users.iter().any(|u| {
+        u["uid"].as_str() != Some(me) && u["username"].as_str().is_some_and(|n| n.to_lowercase() == lower)
+    });
+    if taken {
+        return Err(AppError::Conflict(format!("Нікнейм @{name} уже зайнятий")));
+    }
+    Ok(name)
 }

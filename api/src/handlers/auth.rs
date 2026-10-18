@@ -80,14 +80,24 @@ fn generate_recovery_phrase() -> String {
 /// and create the Marki wallet in Firestore.
 pub async fn register(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<RegisterRequest>,
+    Extension(auth): Extension<AuthenticatedUser>,
+    Json(mut body): Json<RegisterRequest>,
 ) -> ApiResult<(StatusCode, Json<UserData>)> {
+    // Only the signed-in person, only for themselves.
+    if body.uid != auth.uid {
+        return Err(AppError::Forbidden("Можна створити профіль лише для себе".into()));
+    }
     // Idempotent: if user already exists return them.
     if let Some(existing) = state.firestore.get("users", &body.uid).await? {
         let user: UserData = serde_json::from_value(existing)
             .map_err(|e| AppError::Internal(e.into()))?;
         return Ok((StatusCode::OK, Json(user)));
     }
+    body.name = body.name.trim().chars().take(60).collect();
+    if body.name.is_empty() {
+        return Err(AppError::BadRequest("Вкажіть ім’я".into()));
+    }
+    body.username = crate::handlers::profile::check_username(&state, &body.username, &auth.uid).await?;
 
     let now = Utc::now().to_rfc3339();
 
