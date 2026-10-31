@@ -269,9 +269,23 @@ fn is_tester(uid: &str) -> bool {
     }
 }
 
-/// `GET /api/billing/me` — may this account buy plans for free (testing)?
+/// Accounts that create NFTs in the buyers' app (Alan, Boris, Emil, water); others
+/// only collect and scan. Env `MARKI_CREATORS` (comma-separated uids) overrides.
+const CREATORS: &[&str] = &[
+    "Q3wSAgLUyZNi4qbWjn1wD3t3iUz1",                                 // alankharisov1@gmail.com
+    "G9R4RXLaypWnj5rRakSiX7pB9nw1",                                 // Еміль Торосян
+];
+
+fn is_creator(uid: &str) -> bool {
+    match std::env::var("MARKI_CREATORS") {
+        Ok(list) if !list.trim().is_empty() => list.split(',').any(|u| u.trim() == uid),
+        _ => TESTERS.contains(&uid) || CREATORS.contains(&uid),
+    }
+}
+
+/// `GET /api/billing/me` — may this account buy plans for free (testing), and create NFTs?
 pub async fn billing_me(Extension(auth): Extension<AuthenticatedUser>) -> Json<Value> {
-    Json(json!({ "tester": is_tester(&auth.uid) }))
+    Json(json!({ "tester": is_tester(&auth.uid), "creator": is_creator(&auth.uid) }))
 }
 
 /// `POST /api/billing/test-purchase` — testers get a plan as if they had paid:
