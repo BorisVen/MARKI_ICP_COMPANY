@@ -106,7 +106,7 @@ pub async fn checkout(
     let (merchant, domain) = (merchant(), domain());
     let cur = currency();
     let signature = sign(&[&merchant, &domain, &id, &date, &amount, &cur, &product, "1", &amount], &secret());
-    let api = env("PUBLIC_API_URL", "https://idenity.onrender.com");
+    let api = env("PUBLIC_API_URL", "https://marki-gj28.onrender.com");
 
     let fields = vec![
         ("merchantAccount".into(), merchant),
@@ -379,7 +379,7 @@ mod live {
             "amount": serde_json::from_str::<Value>(amount).unwrap(), "currency": cur, "authCode": auth, "cardPan": pan,
             "transactionStatus": status, "reasonCode": reason.parse::<u32>().unwrap(), "reason": "Ok",
         });
-        let r = reqwest::Client::new().post("https://idenity.onrender.com/api/public/billing/wayforpay")
+        let r = reqwest::Client::new().post("https://marki-gj28.onrender.com/api/public/billing/wayforpay")
             .json(&notice).send().await.unwrap();
         println!("server: {} {}", r.status(), r.text().await.unwrap());
         let after = db.get(ORDERS, id).await.unwrap().unwrap();

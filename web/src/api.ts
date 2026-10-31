@@ -3,7 +3,7 @@ import { auth } from './firebase';
 const BASE_URL =
   (import.meta.env.VITE_API_BASE_URL as string) ||
   (import.meta.env.VITE_API_URL as string) ||
-  'https://idenity.onrender.com';
+  'https://marki-gj28.onrender.com';
 
 // console.log('[API] API_BASE_URL:', BASE_URL);
 
