@@ -253,39 +253,29 @@ pub async fn back_to_app(State(state): State<Arc<AppState>>, Path(id): Path<Stri
     Redirect::to(&web).into_response()
 }
 
-/// Accounts that may "buy" a plan without paying while real payments are not
-/// set up (Alan, Boris, water). Env `BILLING_TESTERS` (comma-separated uids) overrides.
-const TESTERS: &[&str] = &[
-    "IQSuPQ6GBFf8aOtDV9tJW0WPkzB3", "UgWB9vvc1pa43LCmByjPjny9Nwo1", // playgameharis@gmail.com
-    "qT8qvbaW5ZT4xTj2sor2tKlod7C2",                                 // alankharisov@gmail.com
-    "bUN9mGgABxXyLDiHsqtPP876rgY2", "oRxU6XGwvmPQNDSri172zoUwp342", // water@gmail.com
-    "gQKgDdOs4yUzan5rm8JcgPEjxNF3",                                 // Борис Венедиктов
-];
-
-fn is_tester(uid: &str) -> bool {
-    match std::env::var("BILLING_TESTERS") {
-        Ok(list) if !list.trim().is_empty() => list.split(',').any(|u| u.trim() == uid),
-        _ => TESTERS.contains(&uid),
-    }
-}
-
-/// Accounts that create NFTs in the buyers' app (Alan, Boris, Emil, water); others
-/// only collect and scan. Env `MARKI_CREATORS` (comma-separated uids) overrides.
+/// The accounts that create NFTs in the buyers' app; everyone else only collects
+/// and scans. While real payments are not set up they take plans without paying
+/// (creating needs a plan). Env `MARKI_CREATORS` (comma-separated uids) overrides.
 const CREATORS: &[&str] = &[
-    "Q3wSAgLUyZNi4qbWjn1wD3t3iUz1",                                 // alankharisov1@gmail.com
-    "G9R4RXLaypWnj5rRakSiX7pB9nw1",                                 // Еміль Торосян
+    "qT8qvbaW5ZT4xTj2sor2tKlod7C2", // alankharisov@gmail.com
+    "gQKgDdOs4yUzan5rm8JcgPEjxNF3", // venediktovb20@gmail.com
+    "G9R4RXLaypWnj5rRakSiX7pB9nw1", // torosyanemil2310@gmail.com
+    "DCAyxg3IoWYoJjHEvgeBfUBCh953", // dimabodiak2008@gmail.com
+    "IQSuPQ6GBFf8aOtDV9tJW0WPkzB3", "UgWB9vvc1pa43LCmByjPjny9Nwo1", // playgameharis@gmail.com
+    "bUN9mGgABxXyLDiHsqtPP876rgY2", "oRxU6XGwvmPQNDSri172zoUwp342", // water@gmail.com
 ];
 
 fn is_creator(uid: &str) -> bool {
     match std::env::var("MARKI_CREATORS") {
         Ok(list) if !list.trim().is_empty() => list.split(',').any(|u| u.trim() == uid),
-        _ => TESTERS.contains(&uid) || CREATORS.contains(&uid),
+        _ => CREATORS.contains(&uid),
     }
 }
 
 /// `GET /api/billing/me` — may this account buy plans for free (testing), and create NFTs?
 pub async fn billing_me(Extension(auth): Extension<AuthenticatedUser>) -> Json<Value> {
-    Json(json!({ "tester": is_tester(&auth.uid), "creator": is_creator(&auth.uid) }))
+    let creator = is_creator(&auth.uid);
+    Json(json!({ "tester": creator, "creator": creator }))
 }
 
 /// `POST /api/billing/test-purchase` — testers get a plan as if they had paid:
@@ -295,7 +285,7 @@ pub async fn test_purchase(
     Extension(auth): Extension<AuthenticatedUser>,
     Json(req): Json<CheckoutRequest>,
 ) -> ApiResult<Json<Value>> {
-    if !is_tester(&auth.uid) {
+    if !is_creator(&auth.uid) {
         return Err(AppError::Forbidden("Тестова покупка доступна лише тестовим акаунтам".into()));
     }
     let (plan_id, plan_name) = PLANS.iter().find(|(id, _)| *id == req.plan_id)
