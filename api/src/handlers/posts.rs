@@ -40,6 +40,8 @@ pub async fn get_posts(
         .into_iter()
         .filter_map(|d| serde_json::from_value(d).ok())
         .collect();
+    let rules = MarketRules::load(&state).await;
+    posts.retain(|p| rules.shows_post(p));
     crate::handlers::names::refresh_posts(&state, &mut posts).await;
 
     Ok(Json(posts))
@@ -320,6 +322,36 @@ pub async fn add_comment(
 // public on its owner's profile; here they come grouped by collection (one
 // card for "Water ×12"), newest first, without the ones a post already shows.
 
+/// What the market leaves out: listed by hand in `market_config/main`
+/// (`hiddenPostIds`, `hiddenNftIds`), plus received gifts and anything about ICP.
+pub(crate) struct MarketRules {
+    hidden_posts: std::collections::HashSet<String>,
+    hidden_nfts: std::collections::HashSet<String>,
+}
+
+impl MarketRules {
+    pub(crate) async fn load(state: &AppState) -> Self {
+        let doc = state.firestore.get("market_config", "main").await.ok().flatten().unwrap_or_default();
+        let set = |k: &str| doc[k].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+        MarketRules { hidden_posts: set("hiddenPostIds"), hidden_nfts: set("hiddenNftIds") }
+    }
+
+    /// Text that names ICP as a word ("Marki on ICP"), not just any blockchain.
+    fn about_icp(text: &str) -> bool {
+        text.split(|c: char| !c.is_alphanumeric()).any(|w| w.eq_ignore_ascii_case("icp"))
+    }
+
+    pub(crate) fn shows_post(&self, p: &Post) -> bool {
+        !self.hidden_posts.contains(&p.id) && !Self::about_icp(&format!("{} {}", p.title, p.description))
+    }
+
+    /// Only things made by their owner: a received gift is not market material.
+    fn shows_nft(&self, n: &crate::models::Nft) -> bool {
+        let received = n.gift_from.is_some() || n.gift_id.is_some() || n.owners.len() > 1;
+        !received && !self.hidden_nfts.contains(&n.id) && !Self::about_icp(&format!("{} {}", n.title, n.description))
+    }
+}
+
 static DISCOVER: std::sync::LazyLock<std::sync::Mutex<Option<(std::time::Instant, Vec<Value>)>>> =
     std::sync::LazyLock::new(Default::default);
 
@@ -334,6 +366,7 @@ pub async fn discover(
         }
     }
     let fs = |e: anyhow::Error| AppError::Firebase(e.to_string());
+    let rules = MarketRules::load(&state).await;
     let in_posts: std::collections::HashSet<String> = state.firestore.query("posts", vec![], None, None).await.map_err(fs)?
         .iter()
         .flat_map(|p| {
@@ -349,7 +382,7 @@ pub async fn discover(
         if uid.is_empty() { continue; }
         let nfts = crate::handlers::nfts::nfts_in_wallet(state.as_ref(), &uid, &wallet).await.unwrap_or_default();
         let mut by_collection: std::collections::BTreeMap<String, Vec<crate::models::Nft>> = Default::default();
-        for n in nfts.into_iter().filter(|n| n.mint_address.as_deref().is_some_and(|m| !m.is_empty()) && !n.image.is_empty()) {
+        for n in nfts.into_iter().filter(|n| n.mint_address.as_deref().is_some_and(|m| !m.is_empty()) && !n.image.is_empty() && rules.shows_nft(n)) {
             let key = format!("{}|{}", n.batch_name.clone().unwrap_or_else(|| n.title.clone()), n.image);
             by_collection.entry(key).or_default().push(n);
         }
@@ -385,4 +418,17 @@ pub async fn discover(
     items.sort_by(|a, b| b["createdAt"].as_str().cmp(&a["createdAt"].as_str()));
     *DISCOVER.lock().unwrap() = Some((std::time::Instant::now(), items.clone()));
     Ok(Json(items))
+}
+
+#[cfg(test)]
+mod market_rules_tests {
+    use super::MarketRules;
+
+    #[test]
+    fn icp_is_matched_as_a_word_only() {
+        assert!(MarketRules::about_icp("MARKI IDENTITY Marki on ICP: proof you can hold"));
+        assert!(!MarketRules::about_icp("The first Marki passport ever minted on the Internet Computer"));
+        assert!(!MarketRules::about_icp("Kofta Вовна"));
+        assert!(!MarketRules::about_icp("Epicplan"));
+    }
 }

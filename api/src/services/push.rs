@@ -375,3 +375,119 @@ mod discover_preview {
         println!("cards: {n}");
     }
 }
+
+#[cfg(test)]
+mod market_inventory {
+    use crate::services::{FirestoreClient, GoogleAuthService};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    /// Live: every minted collection (as the market groups them) with dates, gift origin and ICP mentions.
+    #[tokio::test]
+    #[ignore]
+    async fn market_inventory_live() {
+        dotenvy::dotenv().ok();
+        let config = crate::config::Config::from_env().unwrap();
+        let db = FirestoreClient::new(config.clone(), Arc::new(GoogleAuthService::new(config).unwrap()));
+        let names: BTreeMap<String, String> = db.query("users", vec![], None, Some(5000)).await.unwrap().into_iter()
+            .map(|u| (u["uid"].as_str().unwrap_or("").to_owned(), u["username"].as_str().unwrap_or("").to_owned())).collect();
+        for w in db.query("marki_wallets", vec![], None, None).await.unwrap() {
+            let uid = w["userId"].as_str().or(w["id"].as_str()).unwrap_or("").to_owned();
+            let mut all = w["nfts"].as_array().cloned().unwrap_or_default();
+            for k in 1..=w["nftChunks"].as_u64().unwrap_or(0) {
+                if let Some(c) = db.get("marki_wallet_nfts", &format!("{uid}_{k}")).await.unwrap() { all.extend(c["nfts"].as_array().cloned().unwrap_or_default()); }
+            }
+            let mut g: BTreeMap<String, (usize, String, String, usize, String, String)> = BTreeMap::new();
+            for x in &all {
+                let t = x["batchName"].as_str().filter(|b| !b.is_empty()).or(x["title"].as_str()).unwrap_or("").to_owned();
+                let key = format!("{t}|{}", x["image"].as_str().unwrap_or(""));
+                let e = g.entry(key).or_insert((0, String::new(), String::new(), 0, String::new(), String::new()));
+                e.0 += 1;
+                let c = x["createdAt"].as_str().unwrap_or("").to_owned();
+                if e.1.is_empty() || c < e.1 { e.1 = c.clone(); }
+                if c > e.2 { e.2 = c; }
+                if x["giftFrom"].is_string() || x["giftId"].is_string() || x["owners"].as_array().is_some_and(|o| o.len() > 1) { e.3 += 1; }
+                e.4 = x["mintAddress"].as_str().unwrap_or("-").chars().take(10).collect();
+                e.5 = format!("{} {}", x["title"].as_str().unwrap_or(""), x["description"].as_str().unwrap_or("")).chars().take(70).collect();
+            }
+            for (k, (n, a, b, gifted, mint, txt)) in g {
+                println!("@{:<14}|{:<24}|×{n:<3}|{}..{}|gifted {gifted}|{mint}|{}", names.get(&uid).cloned().unwrap_or(uid.clone()), k.split('|').next().unwrap_or(""), &a.get(..10).unwrap_or(""), &b.get(..10).unwrap_or(""), txt.replace('\n', " "));
+            }
+        }
+        for p in db.query("posts", vec![], None, None).await.unwrap() {
+            println!("POST @{} «{}» {} forSale={} {}", names.get(p["userId"].as_str().unwrap_or("")).cloned().unwrap_or_default(), p["title"].as_str().unwrap_or(""), p["createdAt"].as_str().unwrap_or("").get(..10).unwrap_or(""), p["forSale"], p["id"].as_str().unwrap_or(""));
+        }
+    }
+}
+
+#[cfg(test)]
+mod market_curation {
+    use crate::services::{FirestoreClient, GoogleAuthService};
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    const WATER: &str = "bUN9mGgABxXyLDiHsqtPP876rgY2";
+    const ALAN: &str = "qT8qvbaW5ZT4xTj2sor2tKlod7C2"; // alankharisov@gmail.com
+
+    async fn wallet(db: &FirestoreClient, uid: &str) -> (Value, Vec<Value>) {
+        let w = db.get("marki_wallets", uid).await.unwrap().unwrap_or_else(|| json!({ "nfts": [] }));
+        let mut all = w["nfts"].as_array().cloned().unwrap_or_default();
+        for k in 1..=w["nftChunks"].as_u64().unwrap_or(0) {
+            if let Some(c) = db.get("marki_wallet_nfts", &format!("{uid}_{k}")).await.unwrap() { all.extend(c["nfts"].as_array().cloned().unwrap_or_default()); }
+        }
+        (w, all)
+    }
+
+    async fn save(db: &FirestoreClient, uid: &str, old_chunks: u64, nfts: &[Value]) {
+        let mut parts = nfts.chunks(400);
+        let first = parts.next().unwrap_or(&[]).to_vec();
+        let rest: Vec<Vec<Value>> = parts.map(|c| c.to_vec()).collect();
+        for (i, part) in rest.iter().enumerate() {
+            db.set_raw("marki_wallet_nfts", &format!("{uid}_{}", i + 1), &json!({ "userId": uid, "nfts": part })).await.unwrap();
+        }
+        db.update("marki_wallets", uid, &json!({ "nfts": first, "nftChunks": rest.len() })).await.unwrap();
+        for k in rest.len() as u64 + 1..=old_chunks { let _ = db.delete("marki_wallet_nfts", &format!("{uid}_{k}")).await; }
+    }
+
+    /// «Marki Genesis #1» from @water to @alankharisov (both Alan's) as if issued
+    /// there, and the market's hidden list. Dry run; `APPLY=1 BACKUP=<file>` writes.
+    #[tokio::test]
+    #[ignore]
+    async fn market_curation_live() {
+        dotenvy::dotenv().ok();
+        let config = crate::config::Config::from_env().unwrap();
+        let db = FirestoreClient::new(config.clone(), Arc::new(GoogleAuthService::new(config).unwrap()));
+        let apply = std::env::var("APPLY").is_ok_and(|v| v == "1");
+        let alan = db.get("users", ALAN).await.unwrap().unwrap();
+        let (name, nick) = (alan["name"].as_str().unwrap_or("").to_owned(), alan["username"].as_str().unwrap_or("").to_owned());
+
+        let (ww, mut water) = wallet(&db, WATER).await;
+        let (aw, mut mine) = wallet(&db, ALAN).await;
+        let pos = water.iter().position(|n| n["title"] == "Marki Genesis #1").expect("Genesis not in @water");
+        let mut g = water.remove(pos);
+        let backup = json!({ "genesis": g.clone(), "post": db.get("posts", "kMZX8UIOXccaELy08qwq").await.unwrap() });
+        let id = g["id"].as_str().unwrap().to_owned();
+        let at = g["createdAt"].as_str().unwrap_or("").to_owned();
+        g["ownerId"] = json!(ALAN);
+        g["ownerName"] = json!(name);
+        g["owners"] = json!([{ "uid": ALAN, "name": name, "username": nick, "at": at, "via": "issued" }]);
+        for k in ["giftFrom", "giftId"] { g.as_object_mut().unwrap().remove(k); }
+        println!("Genesis {id} → @{nick} ({name}), minted {at}, mint {}", g["mintAddress"]);
+
+        let pick = |list: &[Value], title: &str| list.iter().filter(|n| n["batchName"] == title || n["title"].as_str().is_some_and(|t| t.starts_with(title))).filter_map(|n| n["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        let mut hidden_nfts = pick(&water, "Marki");
+        hidden_nfts.extend(pick(&mine, "Marki Gift Test"));
+        let hidden_posts = vec!["1XWwVbtdJLfZidLOHzTX".to_owned()];
+        println!("hide {} NFTs, posts {:?}", hidden_nfts.len(), hidden_posts);
+        if !apply { println!("dry run"); return; }
+
+        std::fs::write(std::env::var("BACKUP").unwrap(), serde_json::to_string_pretty(&backup).unwrap()).unwrap();
+        mine.push(g);
+        save(&db, ALAN, aw["nftChunks"].as_u64().unwrap_or(0), &mine).await;
+        save(&db, WATER, ww["nftChunks"].as_u64().unwrap_or(0), &water).await;
+        db.set_raw("nft_moves", &id, &json!({ "ownerId": ALAN, "nftId": id, "at": chrono::Utc::now().to_rfc3339() })).await.unwrap();
+        db.update("posts", "kMZX8UIOXccaELy08qwq", &json!({ "userId": ALAN, "userName": name, "userAvatar": alan["avatar"] })).await.unwrap();
+        db.set_raw("market_config", "main", &json!({ "hiddenNftIds": hidden_nfts, "hiddenPostIds": hidden_posts })).await.unwrap();
+        println!("applied");
+    }
+}

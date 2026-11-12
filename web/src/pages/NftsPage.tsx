@@ -861,7 +861,7 @@ function CreateNftWizard({ onDone }: { onDone: () => Promise<void> }) {
 
             <div className="field">
               <label>Опис *</label>
-              <textarea value={description} maxLength={300} onChange={e => setDescription(e.target.value)} />
+              <textarea value={description} maxLength={1000} onChange={e => setDescription(e.target.value)} />
               <div className="char-count">{description.length}/300</div>
             </div>
 
